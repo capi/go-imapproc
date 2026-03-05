@@ -1,6 +1,7 @@
 // imapproc connects to an IMAP server, processes unread emails by invoking
-// an external program for each one, and marks them as read on success.
-// It uses IMAP IDLE to wait for new messages and runs until Ctrl-C is received.
+// an external program for each one, and on success either marks them as read
+// or deletes them (configurable). It uses IMAP IDLE to wait for new messages
+// and runs until Ctrl-C is received.
 package main
 
 import (
@@ -30,8 +31,8 @@ func main() {
 		log.Printf("using config file: %s", configPath)
 	}
 	r := cfg.redacted()
-	log.Printf("config: addr=%s user=%s mailbox=%s exec=%s password=%s",
-		r.Addr, r.User, r.Mailbox, r.Exec, r.Pass)
+	log.Printf("config: addr=%s user=%s mailbox=%s exec=%s on_success=%s password=%s",
+		r.Addr, r.User, r.Mailbox, r.Exec, r.OnSuccess, r.Pass)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -55,6 +56,7 @@ func parseConfig(args []string, w io.Writer) (*Config, string, error) {
 	pass := fs.String("pass", "", "IMAP password")
 	mailbox := fs.String("mailbox", "", "Mailbox to monitor (default: INBOX)")
 	execProg := fs.String("exec", "", "Program to run for each unread message (receives raw email on stdin)")
+	onSuccess := fs.String("on-success", "", `Action on successful processing: "seen" (default) or "delete"`)
 	help := fs.Bool("help", false, "Show this help text")
 
 	fs.Usage = func() {
@@ -94,14 +96,20 @@ func parseConfig(args []string, w io.Writer) (*Config, string, error) {
 	if *execProg != "" {
 		cfg.Exec = *execProg
 	}
+	if *onSuccess != "" {
+		cfg.OnSuccess = OnSuccessAction(*onSuccess)
+	}
 	// Positional args override --exec.
 	if fs.NArg() > 0 {
 		cfg.Exec = fs.Args()[0]
 	}
 
-	// Apply default mailbox after merging.
+	// Apply defaults after merging.
 	if cfg.Mailbox == "" {
 		cfg.Mailbox = "INBOX"
+	}
+	if cfg.OnSuccess == "" {
+		cfg.OnSuccess = OnSuccessSeen
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -161,7 +169,7 @@ func runWithClient(ctx context.Context, c *imapclient.Client, cfg *Config) error
 	var programArgs []string
 
 	for {
-		if err := processUnread(c, program, programArgs); err != nil {
+		if err := processUnread(c, program, programArgs, cfg.OnSuccess); err != nil {
 			return err
 		}
 
@@ -181,7 +189,7 @@ func runWithClient(ctx context.Context, c *imapclient.Client, cfg *Config) error
 
 // processUnread searches for all unread messages in the selected mailbox and
 // invokes the external program for each one.
-func processUnread(c *imapclient.Client, program string, programArgs []string) error {
+func processUnread(c *imapclient.Client, program string, programArgs []string, onSuccess OnSuccessAction) error {
 	criteria := &imap.SearchCriteria{
 		// NotFlag \Seen means "unread"
 		NotFlag: []imap.Flag{imap.FlagSeen},
@@ -199,7 +207,7 @@ func processUnread(c *imapclient.Client, program string, programArgs []string) e
 	log.Printf("found %d unread message(s)", len(uids))
 
 	for _, uid := range uids {
-		if err := processMessage(c, uid, program, programArgs); err != nil {
+		if err := processMessage(c, uid, program, programArgs, onSuccess); err != nil {
 			// Log and continue; a single message failure should not abort the run.
 			log.Printf("error processing UID %d: %v", uid, err)
 		}
@@ -208,8 +216,9 @@ func processUnread(c *imapclient.Client, program string, programArgs []string) e
 }
 
 // processMessage fetches the raw RFC822 content of a message, pipes it to the
-// external program, and marks it as read if the program exits with code 0.
-func processMessage(c *imapclient.Client, uid imap.UID, program string, programArgs []string) error {
+// external program, and on success performs the configured OnSuccess action
+// (mark as \Seen or delete).
+func processMessage(c *imapclient.Client, uid imap.UID, program string, programArgs []string, onSuccess OnSuccessAction) error {
 	uidSet := imap.UIDSetNum(uid)
 	// Peek: true prevents the server from implicitly marking the message \Seen
 	// on fetch. We set \Seen explicitly only after the external program exits
@@ -265,16 +274,33 @@ func processMessage(c *imapclient.Client, uid imap.UID, program string, programA
 		return nil
 	}
 
-	// Mark as read (\Seen).
-	storeFlags := &imap.StoreFlags{
-		Op:     imap.StoreFlagsAdd,
-		Flags:  []imap.Flag{imap.FlagSeen},
-		Silent: true,
+	switch onSuccess {
+	case OnSuccessDelete:
+		// Mark as \Deleted and then expunge.
+		storeFlags := &imap.StoreFlags{
+			Op:     imap.StoreFlagsAdd,
+			Flags:  []imap.Flag{imap.FlagDeleted},
+			Silent: true,
+		}
+		if err := c.Store(uidSet, storeFlags, nil).Close(); err != nil {
+			return fmt.Errorf("UID %d: mark as deleted: %w", uid, err)
+		}
+		if err := c.UIDExpunge(uidSet).Close(); err != nil {
+			return fmt.Errorf("UID %d: expunge: %w", uid, err)
+		}
+		log.Printf("UID %d: deleted", uid)
+	default: // OnSuccessSeen
+		// Mark as read (\Seen).
+		storeFlags := &imap.StoreFlags{
+			Op:     imap.StoreFlagsAdd,
+			Flags:  []imap.Flag{imap.FlagSeen},
+			Silent: true,
+		}
+		if err := c.Store(uidSet, storeFlags, nil).Close(); err != nil {
+			return fmt.Errorf("UID %d: mark as read: %w", uid, err)
+		}
+		log.Printf("UID %d: marked as read", uid)
 	}
-	if err := c.Store(uidSet, storeFlags, nil).Close(); err != nil {
-		return fmt.Errorf("UID %d: mark as read: %w", uid, err)
-	}
-	log.Printf("UID %d: marked as read", uid)
 	return nil
 }
 

@@ -9,13 +9,25 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// OnSuccessAction controls what happens to a message after it is successfully
+// processed by the external program.
+type OnSuccessAction string
+
+const (
+	// OnSuccessSeen marks the message as \Seen (read). This is the default.
+	OnSuccessSeen OnSuccessAction = "seen"
+	// OnSuccessDelete expunges the message from the mailbox.
+	OnSuccessDelete OnSuccessAction = "delete"
+)
+
 // Config holds all runtime settings for imapproc.
 type Config struct {
-	Addr    string `yaml:"addr"`
-	User    string `yaml:"user"`
-	Pass    string `yaml:"pass"`
-	Mailbox string `yaml:"mailbox"`
-	Exec    string `yaml:"exec"`
+	Addr      string          `yaml:"addr"`
+	User      string          `yaml:"user"`
+	Pass      string          `yaml:"pass"`
+	Mailbox   string          `yaml:"mailbox"`
+	Exec      string          `yaml:"exec"`
+	OnSuccess OnSuccessAction `yaml:"on_success"`
 }
 
 // defaultConfigPaths returns the ordered list of candidate config file locations.
@@ -70,7 +82,7 @@ func findAndLoadConfig(explicit string) (*Config, string, error) {
 	return &Config{}, "", nil
 }
 
-// validate returns an error if any required field is empty.
+// validate returns an error if any required field is empty or invalid.
 func (c *Config) validate() error {
 	var missing []string
 	if c.Addr == "" {
@@ -87,6 +99,12 @@ func (c *Config) validate() error {
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("missing required settings: %v (set in config file or via flags)", missing)
+	}
+	switch c.OnSuccess {
+	case OnSuccessSeen, OnSuccessDelete:
+		// valid
+	default:
+		return fmt.Errorf("invalid on_success value %q: must be %q or %q", c.OnSuccess, OnSuccessSeen, OnSuccessDelete)
 	}
 	return nil
 }

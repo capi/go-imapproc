@@ -10,6 +10,8 @@ package main
 //     are skipped
 //   - A message is marked \Seen after the external program exits with code 0
 //   - A message is NOT marked \Seen when the external program exits non-zero
+//   - OnSuccessDelete: message is deleted after successful processing
+//   - OnSuccessDelete: message is NOT deleted when program exits non-zero
 
 import (
 	"bytes"
@@ -139,8 +141,6 @@ func writeTempScript(t *testing.T, script string) string {
 // run-loop checks ctx.Err() before going into IDLE and exits cleanly.
 func runOnce(t *testing.T, addr, mailbox, program string) error {
 	t.Helper()
-	c := dialInsecure(t, addr)
-
 	cfg := &Config{
 		Addr:    addr,
 		User:    testUser,
@@ -148,6 +148,14 @@ func runOnce(t *testing.T, addr, mailbox, program string) error {
 		Mailbox: mailbox,
 		Exec:    program,
 	}
+	return runOnceCfg(t, addr, cfg)
+}
+
+// runOnceCfg is like runOnce but accepts a full Config for tests that need to
+// set fields beyond the basic connection parameters (e.g. OnSuccess).
+func runOnceCfg(t *testing.T, addr string, cfg *Config) error {
+	t.Helper()
+	c := dialInsecure(t, addr)
 
 	// Cancel immediately so the loop exits after the first processUnread pass
 	// without blocking in IDLE.
@@ -155,6 +163,22 @@ func runOnce(t *testing.T, addr, mailbox, program string) error {
 	cancel()
 
 	return runWithClient(ctx, c, cfg)
+}
+
+// countMessages opens a fresh client connection and returns the total number
+// of messages in the mailbox (regardless of \Seen flag). Used to verify
+// that messages were deleted.
+func countMessages(t *testing.T, addr, mailbox string) int {
+	t.Helper()
+	c := dialInsecure(t, addr)
+	if err := c.Login(testUser, testPass).Wait(); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	data, err := c.Select(mailbox, nil).Wait()
+	if err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	return int(data.NumMessages)
 }
 
 // -----------------------------------------------------------------------------
@@ -335,5 +359,87 @@ func TestIntegration_ContextCancelledBeforeIdle(t *testing.T) {
 	}
 	if err := runWithClient(ctx, c, cfg); err != nil {
 		t.Fatalf("unexpected error on cancelled context: %v", err)
+	}
+}
+
+// TestIntegration_DeleteOnSuccess verifies that when OnSuccess is set to
+// OnSuccessDelete, a successfully processed message is deleted from the
+// mailbox.
+func TestIntegration_DeleteOnSuccess(t *testing.T) {
+	_, user, addr := newTestServer(t)
+	appendMessage(t, user, testMailbox, testRawEmail) // unread
+
+	script := writeTempScript(t, "exit 0")
+
+	cfg := &Config{
+		Addr:      addr,
+		User:      testUser,
+		Pass:      testPass,
+		Mailbox:   testMailbox,
+		Exec:      script,
+		OnSuccess: OnSuccessDelete,
+	}
+	if err := runOnceCfg(t, addr, cfg); err != nil {
+		t.Fatalf("runOnceCfg: %v", err)
+	}
+
+	// The message must have been deleted.
+	if n := countMessages(t, addr, testMailbox); n != 0 {
+		t.Errorf("expected message to be deleted, but mailbox contains %d message(s)", n)
+	}
+}
+
+// TestIntegration_DeleteNotPerformedOnFailure verifies that when OnSuccess is
+// set to OnSuccessDelete, a message whose program exits non-zero is NOT deleted.
+func TestIntegration_DeleteNotPerformedOnFailure(t *testing.T) {
+	_, user, addr := newTestServer(t)
+	appendMessage(t, user, testMailbox, testRawEmail) // unread
+
+	script := writeTempScript(t, "exit 1")
+
+	cfg := &Config{
+		Addr:      addr,
+		User:      testUser,
+		Pass:      testPass,
+		Mailbox:   testMailbox,
+		Exec:      script,
+		OnSuccess: OnSuccessDelete,
+	}
+	if err := runOnceCfg(t, addr, cfg); err != nil {
+		t.Fatalf("runOnceCfg: %v", err)
+	}
+
+	// The message must still be present.
+	if n := countMessages(t, addr, testMailbox); n != 1 {
+		t.Errorf("expected message to remain, but mailbox contains %d message(s)", n)
+	}
+}
+
+// TestIntegration_MarkSeenOnSuccess_ExplicitConfig verifies that the default
+// OnSuccessSeen action still marks messages as \Seen (regression guard).
+func TestIntegration_MarkSeenOnSuccess_ExplicitConfig(t *testing.T) {
+	_, user, addr := newTestServer(t)
+	appendMessage(t, user, testMailbox, testRawEmail) // unread
+
+	script := writeTempScript(t, "exit 0")
+
+	cfg := &Config{
+		Addr:      addr,
+		User:      testUser,
+		Pass:      testPass,
+		Mailbox:   testMailbox,
+		Exec:      script,
+		OnSuccess: OnSuccessSeen,
+	}
+	if err := runOnceCfg(t, addr, cfg); err != nil {
+		t.Fatalf("runOnceCfg: %v", err)
+	}
+
+	if n := countUnread(t, addr, testMailbox); n != 0 {
+		t.Errorf("expected message to be marked read, but unread count = %d", n)
+	}
+	// The message must still exist (only seen, not deleted).
+	if n := countMessages(t, addr, testMailbox); n != 1 {
+		t.Errorf("expected message to remain in mailbox, but count = %d", n)
 	}
 }
