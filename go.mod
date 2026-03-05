@@ -1,4 +1,4 @@
-module github.com/anomalyco/go-imap2gmail
+module github.com/capi/go-imapproc
 
 go 1.25.6
 
