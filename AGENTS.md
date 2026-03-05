@@ -1,4 +1,4 @@
 - You run in a devcontainer. Ask the user to install additional tools you need.
 - Avoid adding new dependencies without permission.
 - Use Makefile targets to build/verify/etc. Tidy code and use formatter.
-- Prefix git commits with your agent's name, e.g. "opencode: the change". Use short commit messages.
+- Prefix git commits with your agent's name, e.g. "OpenCode: The change". Use short commit messages. Explain details in body.
