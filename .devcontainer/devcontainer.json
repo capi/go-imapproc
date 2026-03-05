@@ -1,0 +1,18 @@
+{
+	"name": "go-imapproc",
+	"build": {
+		"dockerfile": "Dockerfile",
+		"context": ".."
+	},
+	"features": {
+		"ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+			"moby": false
+		},
+		"ghcr.io/georgofenbeck/features/lazygit-linuxbinary:1": {}
+	},
+	"mounts": [
+		"source=${localEnv:HOME}/.local/share/opencode/auth.json,target=/mnt/opencode-auth.json,type=bind,consistency=cached"
+	]
+	,
+	"postStartCommand": "./.devcontainer/post-start.sh"
+}
