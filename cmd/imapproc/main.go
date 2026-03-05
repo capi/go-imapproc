@@ -1,12 +1,12 @@
-// imap2gmail connects to an IMAP server, processes unread emails by invoking
+// imapproc connects to an IMAP server, processes unread emails by invoking
 // an external program for each one, and marks them as read on success.
 // It uses IMAP IDLE to wait for new messages and runs until Ctrl-C is received.
 package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
+	flag "github.com/spf13/pflag"
 	"log"
 	"os"
 	"os/exec"
@@ -23,7 +23,7 @@ func main() {
 	pass := flag.String("pass", "", "IMAP password")
 	mailbox := flag.String("mailbox", "INBOX", "Mailbox to monitor")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: %s -addr <host:port> -user <user> -pass <pass> <program> [args...]\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage: %s --addr <host:port> --user <user> --pass <pass> <program> [args...]\n\n", os.Args[0])
 		flag.PrintDefaults()
 	}
 	flag.Parse()
