@@ -140,6 +140,14 @@ func run(ctx context.Context, cfg *Config) error {
 	}
 	defer c.Close()
 
+	return runWithClient(ctx, c, cfg)
+}
+
+// runWithClient logs in, selects the configured mailbox, and then runs the
+// process-idle loop using an already-connected (but not yet authenticated)
+// IMAP client. Separating dial from logic enables integration tests to inject
+// a plain-TCP in-process client without TLS.
+func runWithClient(ctx context.Context, c *imapclient.Client, cfg *Config) error {
 	if err := c.Login(cfg.User, cfg.Pass).Wait(); err != nil {
 		return fmt.Errorf("login: %w", err)
 	}
@@ -203,7 +211,10 @@ func processUnread(c *imapclient.Client, program string, programArgs []string) e
 // external program, and marks it as read if the program exits with code 0.
 func processMessage(c *imapclient.Client, uid imap.UID, program string, programArgs []string) error {
 	uidSet := imap.UIDSetNum(uid)
-	bodySection := &imap.FetchItemBodySection{}
+	// Peek: true prevents the server from implicitly marking the message \Seen
+	// on fetch. We set \Seen explicitly only after the external program exits
+	// with code 0, which is the intended semantics.
+	bodySection := &imap.FetchItemBodySection{Peek: true}
 	fetchOptions := &imap.FetchOptions{
 		UID:         true,
 		BodySection: []*imap.FetchItemBodySection{bodySection},
