@@ -6,47 +6,121 @@ package main
 import (
 	"context"
 	"fmt"
-	flag "github.com/spf13/pflag"
+	"io"
 	"log"
 	"os"
 	"os/exec"
 	"os/signal"
 	"syscall"
 
+	"github.com/spf13/pflag"
+
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
 )
 
 func main() {
-	addr := flag.String("addr", "", "IMAP server address (e.g. imap.gmail.com:993)")
-	user := flag.String("user", "", "IMAP username")
-	pass := flag.String("pass", "", "IMAP password")
-	mailbox := flag.String("mailbox", "INBOX", "Mailbox to monitor")
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: %s --addr <host:port> --user <user> --pass <pass> <program> [args...]\n\n", os.Args[0])
-		flag.PrintDefaults()
-	}
-	flag.Parse()
-
-	if *addr == "" || *user == "" || *pass == "" || flag.NArg() == 0 {
-		flag.Usage()
+	cfg, configPath, err := parseConfig(os.Args[1:], os.Stderr)
+	if err != nil {
+		// parseConfig already wrote usage/error details to stderr.
 		os.Exit(1)
 	}
 
-	program := flag.Args()[0]
-	programArgs := flag.Args()[1:]
+	if configPath != "" {
+		log.Printf("using config file: %s", configPath)
+	}
+	r := cfg.redacted()
+	log.Printf("config: addr=%s user=%s mailbox=%s exec=%s password=%s",
+		r.Addr, r.User, r.Mailbox, r.Exec, r.Pass)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, *addr, *user, *pass, *mailbox, program, programArgs); err != nil {
+	if err := run(ctx, cfg); err != nil {
 		log.Fatal(err)
 	}
 }
 
+// parseConfig builds the effective Config from args and any config file found.
+// It returns the config, the path of the config file that was loaded (empty if
+// none), and an error if the config is incomplete or --help was requested.
+// Any usage/error messages are written to w.
+func parseConfig(args []string, w io.Writer) (*Config, string, error) {
+	fs := pflag.NewFlagSet("imapproc", pflag.ContinueOnError)
+	fs.SetOutput(w)
+
+	configFile := fs.String("config", "", "Path to config file (default: imapproc.yaml, ~/.imapproc.yaml, /etc/imapproc/config.yaml)")
+	addr := fs.String("addr", "", "IMAP server address (e.g. imap.gmail.com:993)")
+	user := fs.String("user", "", "IMAP username")
+	pass := fs.String("pass", "", "IMAP password")
+	mailbox := fs.String("mailbox", "", "Mailbox to monitor (default: INBOX)")
+	execProg := fs.String("exec", "", "Program to run for each unread message (receives raw email on stdin)")
+	help := fs.Bool("help", false, "Show this help text")
+
+	fs.Usage = func() {
+		fmt.Fprintf(w, "Usage: imapproc [flags] [program [args...]]\n\n")
+		fmt.Fprintf(w, "  Positional program and args override --exec.\n\n")
+		fs.PrintDefaults()
+	}
+
+	if err := fs.Parse(args); err != nil {
+		return nil, "", err
+	}
+
+	if *help {
+		fs.Usage()
+		return nil, "", fmt.Errorf("help requested")
+	}
+
+	cfg, configPath, err := findAndLoadConfig(*configFile)
+	if err != nil {
+		fmt.Fprintln(w, err)
+		return nil, "", err
+	}
+
+	// CLI flags override config file values when explicitly set.
+	if *addr != "" {
+		cfg.Addr = *addr
+	}
+	if *user != "" {
+		cfg.User = *user
+	}
+	if *pass != "" {
+		cfg.Pass = *pass
+	}
+	if *mailbox != "" {
+		cfg.Mailbox = *mailbox
+	}
+	if *execProg != "" {
+		cfg.Exec = *execProg
+	}
+	// Positional args override --exec.
+	if fs.NArg() > 0 {
+		cfg.Exec = fs.Args()[0]
+	}
+
+	// Apply default mailbox after merging.
+	if cfg.Mailbox == "" {
+		cfg.Mailbox = "INBOX"
+	}
+
+	if err := cfg.validate(); err != nil {
+		// Only show usage hint when no config file was found; if a file was
+		// found but is incomplete, just report the specific error.
+		if configPath == "" {
+			fs.Usage()
+			fmt.Fprintln(w)
+		}
+		fmt.Fprintln(w, err)
+		return nil, "", err
+	}
+
+	return cfg, configPath, nil
+}
+
 // run connects to the IMAP server, processes existing unread messages, then
 // uses IDLE to wait for new ones until ctx is cancelled.
-func run(ctx context.Context, addr, user, pass, mailbox, program string, programArgs []string) error {
+func run(ctx context.Context, cfg *Config) error {
 	options := &imapclient.Options{
 		UnilateralDataHandler: &imapclient.UnilateralDataHandler{
 			// Mailbox is called when the server pushes a mailbox status update,
@@ -59,21 +133,24 @@ func run(ctx context.Context, addr, user, pass, mailbox, program string, program
 		},
 	}
 
-	log.Printf("connecting to %s", addr)
-	c, err := imapclient.DialTLS(addr, options)
+	log.Printf("connecting to %s", cfg.Addr)
+	c, err := imapclient.DialTLS(cfg.Addr, options)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
 	defer c.Close()
 
-	if err := c.Login(user, pass).Wait(); err != nil {
+	if err := c.Login(cfg.User, cfg.Pass).Wait(); err != nil {
 		return fmt.Errorf("login: %w", err)
 	}
-	log.Printf("logged in as %s", user)
+	log.Printf("logged in as %s", cfg.User)
 
-	if _, err := c.Select(mailbox, nil).Wait(); err != nil {
-		return fmt.Errorf("select %s: %w", mailbox, err)
+	if _, err := c.Select(cfg.Mailbox, nil).Wait(); err != nil {
+		return fmt.Errorf("select %s: %w", cfg.Mailbox, err)
 	}
+
+	program := cfg.Exec
+	var programArgs []string
 
 	for {
 		if err := processUnread(c, program, programArgs); err != nil {

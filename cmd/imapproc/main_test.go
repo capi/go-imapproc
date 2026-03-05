@@ -1,0 +1,198 @@
+package main
+
+import (
+	"io"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+// fullArgs returns a slice of flag args that satisfies all required fields.
+func fullArgs(overrides ...string) []string {
+	base := []string{
+		"--addr", "imap.example.com:993",
+		"--user", "alice",
+		"--pass", "secret",
+		"--exec", "/bin/process",
+	}
+	return append(base, overrides...)
+}
+
+// writeYAML creates a temporary YAML config file and returns its path.
+func writeYAML(t *testing.T, content string) string {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "imapproc-*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	return f.Name()
+}
+
+func TestParseConfig_AllFlags(t *testing.T) {
+	cfg, configPath, err := parseConfig(fullArgs(), io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if configPath != "" {
+		t.Errorf("expected no config file, got %q", configPath)
+	}
+	if cfg.Addr != "imap.example.com:993" {
+		t.Errorf("addr = %q", cfg.Addr)
+	}
+	if cfg.User != "alice" {
+		t.Errorf("user = %q", cfg.User)
+	}
+	if cfg.Pass != "secret" {
+		t.Errorf("pass = %q", cfg.Pass)
+	}
+	if cfg.Exec != "/bin/process" {
+		t.Errorf("exec = %q", cfg.Exec)
+	}
+	if cfg.Mailbox != "INBOX" {
+		t.Errorf("mailbox default = %q, want INBOX", cfg.Mailbox)
+	}
+}
+
+func TestParseConfig_DefaultMailbox(t *testing.T) {
+	cfg, _, err := parseConfig(fullArgs(), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Mailbox != "INBOX" {
+		t.Errorf("mailbox = %q, want INBOX", cfg.Mailbox)
+	}
+}
+
+func TestParseConfig_MailboxOverride(t *testing.T) {
+	cfg, _, err := parseConfig(fullArgs("--mailbox", "Sent"), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Mailbox != "Sent" {
+		t.Errorf("mailbox = %q, want Sent", cfg.Mailbox)
+	}
+}
+
+func TestParseConfig_MissingRequired_NoConfigFile(t *testing.T) {
+	_, _, err := parseConfig([]string{}, io.Discard)
+	if err == nil {
+		t.Fatal("expected error for missing required fields, got nil")
+	}
+}
+
+func TestParseConfig_HelpFlag(t *testing.T) {
+	_, _, err := parseConfig([]string{"--help"}, io.Discard)
+	if err == nil {
+		t.Fatal("expected error when --help is passed")
+	}
+}
+
+func TestParseConfig_ConfigFile(t *testing.T) {
+	path := writeYAML(t, `
+addr: imap.example.com:993
+user: bob
+pass: hunter2
+exec: /bin/handler
+mailbox: Work
+`)
+	cfg, configPath, err := parseConfig([]string{"--config", path}, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if configPath != path {
+		t.Errorf("configPath = %q, want %q", configPath, path)
+	}
+	if cfg.User != "bob" {
+		t.Errorf("user = %q", cfg.User)
+	}
+	if cfg.Mailbox != "Work" {
+		t.Errorf("mailbox = %q", cfg.Mailbox)
+	}
+}
+
+func TestParseConfig_FlagOverridesConfigFile(t *testing.T) {
+	path := writeYAML(t, `
+addr: imap.example.com:993
+user: bob
+pass: hunter2
+exec: /bin/handler
+`)
+	cfg, _, err := parseConfig([]string{"--config", path, "--user", "alice"}, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.User != "alice" {
+		t.Errorf("user = %q, want alice (flag should override config)", cfg.User)
+	}
+}
+
+func TestParseConfig_PositionalArgOverridesExec(t *testing.T) {
+	cfg, _, err := parseConfig(fullArgs("/bin/override"), io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Exec != "/bin/override" {
+		t.Errorf("exec = %q, want /bin/override", cfg.Exec)
+	}
+}
+
+func TestParseConfig_DefaultConfigFileUsed(t *testing.T) {
+	// Write a valid config to a temp dir and point the working directory there
+	// so the default search path picks it up.
+	dir := t.TempDir()
+	content := `
+addr: imap.example.com:993
+user: default-user
+pass: default-pass
+exec: /bin/default
+`
+	if err := os.WriteFile(filepath.Join(dir, "imapproc.yaml"), []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(orig) })
+
+	cfg, configPath, err := parseConfig([]string{}, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if configPath != "imapproc.yaml" {
+		t.Errorf("configPath = %q, want imapproc.yaml", configPath)
+	}
+	if cfg.User != "default-user" {
+		t.Errorf("user = %q", cfg.User)
+	}
+}
+
+func TestParseConfig_ConfigFileNotFound_ExplicitPath(t *testing.T) {
+	_, _, err := parseConfig([]string{"--config", "/nonexistent/path.yaml"}, io.Discard)
+	if err == nil {
+		t.Fatal("expected error for missing explicit config file")
+	}
+}
+
+func TestParseConfig_PasswordRedacted(t *testing.T) {
+	cfg, _, err := parseConfig(fullArgs(), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := cfg.redacted()
+	if r.Pass != "******" {
+		t.Errorf("redacted password = %q, want ******", r.Pass)
+	}
+	// Original must be unchanged.
+	if cfg.Pass != "secret" {
+		t.Errorf("original password modified: %q", cfg.Pass)
+	}
+}
