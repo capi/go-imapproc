@@ -32,6 +32,9 @@ type Config struct {
 	// processes messages that arrive via IMAP IDLE after startup. Defaults to
 	// false.
 	OnlyNew bool `yaml:"only_new"`
+	// Once processes all unread messages once and exits without entering IMAP
+	// IDLE. Useful for one-shot/cron-style invocations. Defaults to false.
+	Once bool `yaml:"once"`
 }
 
 // defaultConfigPaths returns the ordered list of candidate config file locations.

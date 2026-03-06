@@ -4,7 +4,7 @@ A lightweight Go daemon that monitors an IMAP mailbox, processes unread emails w
 
 ## Overview
 
-`imapproc` connects to an IMAP server (e.g., Gmail), watches for new messages using IMAP IDLE, and invokes a custom executable for each unread email. The raw RFC822 message is piped to your program's stdin. If the program exits successfully (code 0), the email is marked as read.
+`imapproc` connects to an IMAP server (e.g., Gmail), watches for new messages using IMAP IDLE, and invokes a custom executable for each unread email. The raw RFC822 message is piped to your program's stdin. If the program exits successfully (code 0), the email is marked as read (or deleted, if configured).
 
 ## Use Cases
 
@@ -37,17 +37,32 @@ user: you@gmail.com
 pass: your-app-password
 mailbox: INBOX
 exec: /usr/local/bin/process-email
+
+# Action after successful processing: "seen" (default) or "delete"
+on_success: seen
+
+# Only process messages that arrive after startup via IMAP IDLE;
+# skip the initial scan for pre-existing unread messages.
+only_new: false
+
+# Process all unread messages once and exit without entering IMAP IDLE.
+# Useful for cron-style one-shot invocations.
+once: false
 ```
 
 ### Command-Line Flags
 
 ```
---config string    Path to config file
---addr string      IMAP server address (e.g. imap.gmail.com:993)
---user string      IMAP username
---pass string      IMAP password
---mailbox string   Mailbox to monitor (default: INBOX)
---exec string      Program to run for each unread message
+--config string      Path to config file
+--addr string        IMAP server address (e.g. imap.gmail.com:993)
+--user string        IMAP username
+--pass string        IMAP password
+--mailbox string     Mailbox to monitor (default: INBOX)
+--exec string        Program to run for each unread message
+--on-success string  Action on success: "seen" (default) or "delete"
+--only-new           Skip existing unread messages; only process messages
+                     that arrive via IMAP IDLE after startup
+--once               Process all unread messages once and exit (skip IDLE)
 ```
 
 CLI flags override config file values. Positional arguments override `--exec`.
@@ -63,16 +78,25 @@ imapproc --addr imap.gmail.com:993 --user me@gmail.com --pass mypass --mailbox I
 
 # Using positional program argument
 imapproc /usr/local/bin/process-email arg1 arg2
+
+# One-shot: process current unread messages and exit (no IDLE loop)
+imapproc --once
+
+# Skip pre-existing messages; only handle new arrivals
+imapproc --only-new
 ```
 
 ## How It Works
 
 1. Connects to the IMAP server and authenticates
 2. Searches for all unread messages in the specified mailbox
+   (skipped on the first pass when `only_new` is set)
 3. For each unread message, pipes the raw RFC822 content to your program
-4. Marks the message as read if your program exits with code 0
-5. Uses IMAP IDLE to efficiently wait for new messages
-6. Continues until interrupted (Ctrl-C or SIGTERM)
+4. On success (exit code 0), performs the configured `on_success` action
+   (`seen`: marks as read; `delete`: expunges the message)
+5. If `once` is set, exits after the first pass without entering IDLE
+6. Otherwise, uses IMAP IDLE to efficiently wait for new messages
+7. Continues until interrupted (Ctrl-C or SIGTERM)
 
 ## Requirements
 
