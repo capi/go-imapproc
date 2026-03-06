@@ -28,6 +28,10 @@ type Config struct {
 	Mailbox   string          `yaml:"mailbox"`
 	Exec      string          `yaml:"exec"`
 	OnSuccess OnSuccessAction `yaml:"on_success"`
+	// OnlyNew skips the initial scan for pre-existing unread messages and only
+	// processes messages that arrive via IMAP IDLE after startup. Defaults to
+	// false.
+	OnlyNew bool `yaml:"only_new"`
 }
 
 // defaultConfigPaths returns the ordered list of candidate config file locations.

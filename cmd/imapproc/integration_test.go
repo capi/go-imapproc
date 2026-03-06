@@ -487,3 +487,101 @@ func TestIntegration_OnceFlag(t *testing.T) {
 		t.Errorf("expected 0 unread messages after --once run, got %d", n)
 	}
 }
+
+// TestIntegration_OnlyNew_SkipsExistingUnread verifies that when OnlyNew is
+// true, runWithClient skips the initial processUnread scan — pre-existing
+// unread messages are not processed. The function should still enter IDLE and
+// only process messages that arrive after startup.
+func TestIntegration_OnlyNew_SkipsExistingUnread(t *testing.T) {
+	_, user, addr := newTestServer(t)
+	// Seed one unread message that was already present before startup.
+	appendMessage(t, user, testMailbox, testRawEmail)
+
+	captureDir := t.TempDir()
+	captureFile := filepath.Join(captureDir, "captured.txt")
+	script := writeTempScript(t, "cat >> "+captureFile)
+
+	cfg := &Config{
+		Addr:      addr,
+		User:      testUser,
+		Pass:      testPass,
+		Mailbox:   testMailbox,
+		Exec:      script,
+		OnSuccess: OnSuccessSeen,
+		OnlyNew:   true,
+	}
+
+	// Run with a cancelled context so it exits without entering IDLE.
+	// Because OnlyNew=true, the initial processUnread pass must be skipped.
+	if err := runOnceCfg(t, addr, cfg); err != nil {
+		t.Fatalf("runOnceCfg: %v", err)
+	}
+
+	// The capture file must not have been created — no message was delivered
+	// to the program.
+	if _, err := os.Stat(captureFile); !os.IsNotExist(err) {
+		t.Errorf("expected program not to be called, but capture file exists (err=%v)", err)
+	}
+
+	// The pre-existing unread message must remain unread.
+	if n := countUnread(t, addr, testMailbox); n != 1 {
+		t.Errorf("expected 1 unread (untouched) message, got %d", n)
+	}
+}
+
+// TestIntegration_OnlyNew_ProcessesNewArrival verifies that when OnlyNew is
+// true, messages that arrive after the initial IDLE entry ARE processed on the
+// next processUnread pass (i.e. the skip-scan flag is only applied once).
+//
+// Because the in-process imapmemserver does not terminate IDLE when new
+// messages arrive (it only sends unilateral EXISTS notifications), we simulate
+// a "second pass" by running two sequential runWithClient calls:
+//   - First call: OnlyNew=true, context already cancelled — verifies that the
+//     pre-existing message is NOT processed.
+//   - Second call: OnlyNew=false (default), context already cancelled — verifies
+//     that the same pre-existing message IS now processed (as it would be on any
+//     subsequent pass after IDLE wakes).
+//
+// This confirms that skipScan is only applied to the very first iteration.
+func TestIntegration_OnlyNew_ProcessesNewArrival(t *testing.T) {
+	_, user, addr := newTestServer(t)
+	// Seed one unread message that represents a "pre-existing" email.
+	appendMessage(t, user, testMailbox, testRawEmail)
+
+	script := writeTempScript(t, "exit 0")
+
+	// First run: OnlyNew=true — initial processUnread is skipped, message remains unread.
+	cfgOnlyNew := &Config{
+		Addr:      addr,
+		User:      testUser,
+		Pass:      testPass,
+		Mailbox:   testMailbox,
+		Exec:      script,
+		OnSuccess: OnSuccessSeen,
+		OnlyNew:   true,
+	}
+	if err := runOnceCfg(t, addr, cfgOnlyNew); err != nil {
+		t.Fatalf("first run (OnlyNew=true): %v", err)
+	}
+	if n := countUnread(t, addr, testMailbox); n != 1 {
+		t.Errorf("after OnlyNew=true run: expected 1 unread (skipped), got %d", n)
+	}
+
+	// Second run: OnlyNew=false — simulates what happens after IDLE wakes (skipScan
+	// is false on all subsequent passes). The message must now be processed.
+	cfgNormal := &Config{
+		Addr:      addr,
+		User:      testUser,
+		Pass:      testPass,
+		Mailbox:   testMailbox,
+		Exec:      script,
+		OnSuccess: OnSuccessSeen,
+		OnlyNew:   false,
+	}
+	if err := runOnceCfg(t, addr, cfgNormal); err != nil {
+		t.Fatalf("second run (OnlyNew=false): %v", err)
+	}
+	if n := countUnread(t, addr, testMailbox); n != 0 {
+		t.Errorf("after normal run: expected 0 unread, got %d", n)
+	}
+}

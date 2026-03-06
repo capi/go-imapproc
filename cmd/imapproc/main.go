@@ -31,8 +31,8 @@ func main() {
 		log.Printf("using config file: %s", configPath)
 	}
 	r := cfg.redacted()
-	log.Printf("config: addr=%s user=%s mailbox=%s exec=%s on_success=%s password=%s",
-		r.Addr, r.User, r.Mailbox, r.Exec, r.OnSuccess, r.Pass)
+	log.Printf("config: addr=%s user=%s mailbox=%s exec=%s on_success=%s only_new=%v password=%s",
+		r.Addr, r.User, r.Mailbox, r.Exec, r.OnSuccess, r.OnlyNew, r.Pass)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -59,6 +59,7 @@ func parseConfig(args []string, w io.Writer) (*Config, string, bool, error) {
 	onSuccess := fs.String("on-success", "", `Action on successful processing: "seen" (default) or "delete"`)
 	help := fs.Bool("help", false, "Show this help text")
 	once := fs.Bool("once", false, "Process all unread messages once and exit (skip IDLE)")
+	onlyNew := fs.Bool("only-new", false, "Skip existing unread messages; only process messages that arrive via IMAP IDLE after startup")
 
 	fs.Usage = func() {
 		fmt.Fprintf(w, "Usage: imapproc [flags] [program [args...]]\n\n")
@@ -99,6 +100,11 @@ func parseConfig(args []string, w io.Writer) (*Config, string, bool, error) {
 	}
 	if *onSuccess != "" {
 		cfg.OnSuccess = OnSuccessAction(*onSuccess)
+	}
+	// --only-new is a boolean flag; only override the config file when it is
+	// explicitly set on the command line (i.e. the flag was actually passed).
+	if fs.Changed("only-new") {
+		cfg.OnlyNew = *onlyNew
 	}
 	// Positional args override --exec.
 	if fs.NArg() > 0 {
@@ -171,10 +177,18 @@ func runWithClient(ctx context.Context, c *imapclient.Client, cfg *Config, once 
 	program := cfg.Exec
 	var programArgs []string
 
+	// skipScan starts as true when OnlyNew is set, so the very first
+	// processUnread pass is skipped. After the first IDLE wakeup (a new
+	// message arrived) we clear it so subsequent passes process normally.
+	skipScan := cfg.OnlyNew
+
 	for {
-		if err := processUnread(c, program, programArgs, cfg.OnSuccess); err != nil {
-			return err
+		if !skipScan {
+			if err := processUnread(c, program, programArgs, cfg.OnSuccess); err != nil {
+				return err
+			}
 		}
+		skipScan = false
 
 		if once || ctx.Err() != nil {
 			return nil
