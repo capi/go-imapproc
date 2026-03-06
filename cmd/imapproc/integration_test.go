@@ -162,7 +162,7 @@ func runOnceCfg(t *testing.T, addr string, cfg *Config) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	return runWithClient(ctx, c, cfg)
+	return runWithClient(ctx, c, cfg, false)
 }
 
 // countMessages opens a fresh client connection and returns the total number
@@ -357,7 +357,7 @@ func TestIntegration_ContextCancelledBeforeIdle(t *testing.T) {
 		Mailbox: testMailbox,
 		Exec:    script,
 	}
-	if err := runWithClient(ctx, c, cfg); err != nil {
+	if err := runWithClient(ctx, c, cfg, false); err != nil {
 		t.Fatalf("unexpected error on cancelled context: %v", err)
 	}
 }
@@ -441,5 +441,49 @@ func TestIntegration_MarkSeenOnSuccess_ExplicitConfig(t *testing.T) {
 	// The message must still exist (only seen, not deleted).
 	if n := countMessages(t, addr, testMailbox); n != 1 {
 		t.Errorf("expected message to remain in mailbox, but count = %d", n)
+	}
+}
+
+// TestIntegration_OnceFlag verifies that when once=true is passed to
+// runWithClient, the function processes all unread messages and returns
+// without blocking in IDLE, even when the context is not cancelled.
+func TestIntegration_OnceFlag(t *testing.T) {
+	_, user, addr := newTestServer(t)
+	appendMessage(t, user, testMailbox, testRawEmail) // one unread message
+
+	script := writeTempScript(t, "exit 0")
+
+	cfg := &Config{
+		Addr:      addr,
+		User:      testUser,
+		Pass:      testPass,
+		Mailbox:   testMailbox,
+		Exec:      script,
+		OnSuccess: OnSuccessSeen,
+	}
+
+	c := dialInsecure(t, addr)
+	// Use a background context (not cancelled) to prove that once=true causes
+	// an early return without waiting for IDLE or context cancellation.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runWithClient(ctx, c, cfg, true)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runWithClient returned error: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("runWithClient did not return promptly with once=true; timed out")
+	}
+
+	// The message must have been processed (marked read).
+	if n := countUnread(t, addr, testMailbox); n != 0 {
+		t.Errorf("expected 0 unread messages after --once run, got %d", n)
 	}
 }

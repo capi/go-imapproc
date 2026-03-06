@@ -33,7 +33,7 @@ func writeYAML(t *testing.T, content string) string {
 }
 
 func TestParseConfig_AllFlags(t *testing.T) {
-	cfg, configPath, err := parseConfig(fullArgs(), io.Discard)
+	cfg, configPath, _, err := parseConfig(fullArgs(), io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestParseConfig_AllFlags(t *testing.T) {
 }
 
 func TestParseConfig_DefaultMailbox(t *testing.T) {
-	cfg, _, err := parseConfig(fullArgs(), io.Discard)
+	cfg, _, _, err := parseConfig(fullArgs(), io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestParseConfig_DefaultMailbox(t *testing.T) {
 }
 
 func TestParseConfig_MailboxOverride(t *testing.T) {
-	cfg, _, err := parseConfig(fullArgs("--mailbox", "Sent"), io.Discard)
+	cfg, _, _, err := parseConfig(fullArgs("--mailbox", "Sent"), io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,14 +78,14 @@ func TestParseConfig_MailboxOverride(t *testing.T) {
 }
 
 func TestParseConfig_MissingRequired_NoConfigFile(t *testing.T) {
-	_, _, err := parseConfig([]string{}, io.Discard)
+	_, _, _, err := parseConfig([]string{}, io.Discard)
 	if err == nil {
 		t.Fatal("expected error for missing required fields, got nil")
 	}
 }
 
 func TestParseConfig_HelpFlag(t *testing.T) {
-	_, _, err := parseConfig([]string{"--help"}, io.Discard)
+	_, _, _, err := parseConfig([]string{"--help"}, io.Discard)
 	if err == nil {
 		t.Fatal("expected error when --help is passed")
 	}
@@ -99,7 +99,7 @@ pass: hunter2
 exec: /bin/handler
 mailbox: Work
 `)
-	cfg, configPath, err := parseConfig([]string{"--config", path}, io.Discard)
+	cfg, configPath, _, err := parseConfig([]string{"--config", path}, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -121,7 +121,7 @@ user: bob
 pass: hunter2
 exec: /bin/handler
 `)
-	cfg, _, err := parseConfig([]string{"--config", path, "--user", "alice"}, io.Discard)
+	cfg, _, _, err := parseConfig([]string{"--config", path, "--user", "alice"}, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -131,7 +131,7 @@ exec: /bin/handler
 }
 
 func TestParseConfig_PositionalArgOverridesExec(t *testing.T) {
-	cfg, _, err := parseConfig(fullArgs("/bin/override"), io.Discard)
+	cfg, _, _, err := parseConfig(fullArgs("/bin/override"), io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -163,7 +163,7 @@ exec: /bin/default
 	}
 	t.Cleanup(func() { os.Chdir(orig) })
 
-	cfg, configPath, err := parseConfig([]string{}, io.Discard)
+	cfg, configPath, _, err := parseConfig([]string{}, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -176,14 +176,14 @@ exec: /bin/default
 }
 
 func TestParseConfig_ConfigFileNotFound_ExplicitPath(t *testing.T) {
-	_, _, err := parseConfig([]string{"--config", "/nonexistent/path.yaml"}, io.Discard)
+	_, _, _, err := parseConfig([]string{"--config", "/nonexistent/path.yaml"}, io.Discard)
 	if err == nil {
 		t.Fatal("expected error for missing explicit config file")
 	}
 }
 
 func TestParseConfig_PasswordRedacted(t *testing.T) {
-	cfg, _, err := parseConfig(fullArgs(), io.Discard)
+	cfg, _, _, err := parseConfig(fullArgs(), io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,5 +194,27 @@ func TestParseConfig_PasswordRedacted(t *testing.T) {
 	// Original must be unchanged.
 	if cfg.Pass != "secret" {
 		t.Errorf("original password modified: %q", cfg.Pass)
+	}
+}
+
+func TestParseConfig_OnceFlag(t *testing.T) {
+	// --once should set once=true and not affect Config fields.
+	_, _, once, err := parseConfig(fullArgs("--once"), io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !once {
+		t.Error("once = false, want true when --once is passed")
+	}
+}
+
+func TestParseConfig_OnceFlagDefault(t *testing.T) {
+	// Without --once, once should be false.
+	_, _, once, err := parseConfig(fullArgs(), io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if once {
+		t.Error("once = true, want false when --once is not passed")
 	}
 }

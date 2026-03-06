@@ -21,7 +21,7 @@ import (
 )
 
 func main() {
-	cfg, configPath, err := parseConfig(os.Args[1:], os.Stderr)
+	cfg, configPath, once, err := parseConfig(os.Args[1:], os.Stderr)
 	if err != nil {
 		// parseConfig already wrote usage/error details to stderr.
 		os.Exit(1)
@@ -37,16 +37,16 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, cfg); err != nil {
+	if err := run(ctx, cfg, once); err != nil {
 		log.Fatal(err)
 	}
 }
 
 // parseConfig builds the effective Config from args and any config file found.
 // It returns the config, the path of the config file that was loaded (empty if
-// none), and an error if the config is incomplete or --help was requested.
-// Any usage/error messages are written to w.
-func parseConfig(args []string, w io.Writer) (*Config, string, error) {
+// none), whether --once was passed, and an error if the config is incomplete
+// or --help was requested. Any usage/error messages are written to w.
+func parseConfig(args []string, w io.Writer) (*Config, string, bool, error) {
 	fs := pflag.NewFlagSet("imapproc", pflag.ContinueOnError)
 	fs.SetOutput(w)
 
@@ -58,6 +58,7 @@ func parseConfig(args []string, w io.Writer) (*Config, string, error) {
 	execProg := fs.String("exec", "", "Program to run for each unread message (receives raw email on stdin)")
 	onSuccess := fs.String("on-success", "", `Action on successful processing: "seen" (default) or "delete"`)
 	help := fs.Bool("help", false, "Show this help text")
+	once := fs.Bool("once", false, "Process all unread messages once and exit (skip IDLE)")
 
 	fs.Usage = func() {
 		fmt.Fprintf(w, "Usage: imapproc [flags] [program [args...]]\n\n")
@@ -66,18 +67,18 @@ func parseConfig(args []string, w io.Writer) (*Config, string, error) {
 	}
 
 	if err := fs.Parse(args); err != nil {
-		return nil, "", err
+		return nil, "", false, err
 	}
 
 	if *help {
 		fs.Usage()
-		return nil, "", fmt.Errorf("help requested")
+		return nil, "", false, fmt.Errorf("help requested")
 	}
 
 	cfg, configPath, err := findAndLoadConfig(*configFile)
 	if err != nil {
 		fmt.Fprintln(w, err)
-		return nil, "", err
+		return nil, "", false, err
 	}
 
 	// CLI flags override config file values when explicitly set.
@@ -120,15 +121,16 @@ func parseConfig(args []string, w io.Writer) (*Config, string, error) {
 			fmt.Fprintln(w)
 		}
 		fmt.Fprintln(w, err)
-		return nil, "", err
+		return nil, "", false, err
 	}
 
-	return cfg, configPath, nil
+	return cfg, configPath, *once, nil
 }
 
 // run connects to the IMAP server, processes existing unread messages, then
-// uses IDLE to wait for new ones until ctx is cancelled.
-func run(ctx context.Context, cfg *Config) error {
+// uses IDLE to wait for new ones until ctx is cancelled. When once is true,
+// it exits after the first processUnread pass without entering IDLE.
+func run(ctx context.Context, cfg *Config, once bool) error {
 	options := &imapclient.Options{
 		UnilateralDataHandler: &imapclient.UnilateralDataHandler{
 			// Mailbox is called when the server pushes a mailbox status update,
@@ -148,14 +150,15 @@ func run(ctx context.Context, cfg *Config) error {
 	}
 	defer c.Close()
 
-	return runWithClient(ctx, c, cfg)
+	return runWithClient(ctx, c, cfg, once)
 }
 
 // runWithClient logs in, selects the configured mailbox, and then runs the
 // process-idle loop using an already-connected (but not yet authenticated)
 // IMAP client. Separating dial from logic enables integration tests to inject
-// a plain-TCP in-process client without TLS.
-func runWithClient(ctx context.Context, c *imapclient.Client, cfg *Config) error {
+// a plain-TCP in-process client without TLS. When once is true, the function
+// returns after the first processUnread pass without entering IDLE.
+func runWithClient(ctx context.Context, c *imapclient.Client, cfg *Config, once bool) error {
 	if err := c.Login(cfg.User, cfg.Pass).Wait(); err != nil {
 		return fmt.Errorf("login: %w", err)
 	}
@@ -173,7 +176,7 @@ func runWithClient(ctx context.Context, c *imapclient.Client, cfg *Config) error
 			return err
 		}
 
-		if ctx.Err() != nil {
+		if once || ctx.Err() != nil {
 			return nil
 		}
 
