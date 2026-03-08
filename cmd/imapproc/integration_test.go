@@ -661,12 +661,15 @@ func TestIntegration_IdleWakesOnNewMail(t *testing.T) {
 }
 
 // TestIntegration_IdleWakesOnFlagChange verifies that when a message is marked
-// unread (\\Seen flag removed) during IDLE, runWithClient wakes up, exits IDLE,
-// and processes the now-unread message.
+// unread (\\Seen flag removed) during IDLE, the UnilateralDataHandler.Fetch
+// callback fires, signals newMail, and runWithClient wakes up, exits IDLE, and
+// processes the now-unread message.
 //
-// The test uses the newMail channel directly to simulate what the
-// UnilateralDataHandler.Fetch callback does: it signals newMail when it sees a
-// flag push without \\Seen.
+// Unlike TestIntegration_IdleWakesOnNewMail this test wires the real
+// UnilateralDataHandler (same as run() does) into the client so that the
+// unilateral FETCH push from the server actually triggers the notify path,
+// including the case where FLAGS () is sent (empty flag list, i.e. all flags
+// removed). The test does NOT manually signal newMail.
 func TestIntegration_IdleWakesOnFlagChange(t *testing.T) {
 	_, user, addr := newTestServer(t)
 
@@ -686,12 +689,60 @@ func TestIntegration_IdleWakesOnFlagChange(t *testing.T) {
 		OnSuccess: OnSuccessSeen,
 	}
 
+	// Build the same newMail channel + UnilateralDataHandler that run() uses,
+	// so the test exercises the real notification path end-to-end.
 	newMail := make(chan struct{}, 1)
+	notify := func() {
+		select {
+		case newMail <- struct{}{}:
+		default:
+		}
+	}
+	options := &imapclient.Options{
+		UnilateralDataHandler: &imapclient.UnilateralDataHandler{
+			Mailbox: func(data *imapclient.UnilateralDataMailbox) {
+				if data.NumMessages != nil {
+					notify()
+				}
+			},
+			Fetch: func(msg *imapclient.FetchMessageData) {
+				flagsFound := false
+				seen := false
+				for {
+					item := msg.Next()
+					if item == nil {
+						break
+					}
+					if flagData, ok := item.(imapclient.FetchItemDataFlags); ok {
+						flagsFound = true
+						for _, f := range flagData.Flags {
+							if f == imap.FlagSeen {
+								seen = true
+								break
+							}
+						}
+					}
+				}
+				if flagsFound && !seen {
+					notify()
+				}
+			},
+		},
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	c := dialInsecure(t, addr)
+	// Dial with the handler options so unilateral FETCH pushes are received.
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	c := imapclient.New(conn, options)
+	if err := c.WaitGreeting(); err != nil {
+		t.Fatalf("WaitGreeting: %v", err)
+	}
+	t.Cleanup(func() { c.Close() })
 
 	done := make(chan error, 1)
 	go func() {
@@ -701,8 +752,10 @@ func TestIntegration_IdleWakesOnFlagChange(t *testing.T) {
 	// Wait for the initial processUnread pass (no unread → enters IDLE quickly).
 	time.Sleep(200 * time.Millisecond)
 
-	// Mark the message as unread via a separate client, simulating an external
-	// client removing the \Seen flag.
+	// Mark the message as unread via a separate client, simulating Thunderbird
+	// (or any client) removing the \Seen flag. The server will push an
+	// unsolicited FETCH FLAGS response to c, which the handler above will
+	// convert into a newMail signal.
 	func() {
 		c2 := dialInsecure(t, addr)
 		if err := c2.Login(testUser, testPass).Wait(); err != nil {
@@ -729,11 +782,8 @@ func TestIntegration_IdleWakesOnFlagChange(t *testing.T) {
 		}
 	}()
 
-	// Signal newMail as the UnilateralDataHandler.Fetch callback would when it
-	// sees the flag push without \Seen.
-	newMail <- struct{}{}
-
-	// Allow time for IDLE to wake and processUnread to run.
+	// Allow time for the unilateral FETCH push to arrive, the handler to fire,
+	// IDLE to wake, and processUnread to run.
 	time.Sleep(500 * time.Millisecond)
 
 	cancel()

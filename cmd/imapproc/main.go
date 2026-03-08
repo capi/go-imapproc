@@ -171,18 +171,34 @@ func run(ctx context.Context, cfg *Config) error {
 			// If the updated flags do not include \Seen the message is (now)
 			// unread and we should process it.
 			Fetch: func(msg *imapclient.FetchMessageData) {
-				buf, err := msg.Collect()
-				if err != nil {
-					return
-				}
-				if buf.Flags == nil {
-					// No flags in this push; nothing to act on.
-					return
-				}
-				for _, f := range buf.Flags {
-					if f == imap.FlagSeen {
-						return // message is (still) read — ignore
+				// Iterate items directly so we can distinguish "FLAGS item
+				// present but empty" (message has no flags → unread) from
+				// "no FLAGS item in response" (nothing to act on).
+				// Using Collect() loses this distinction because both cases
+				// result in buf.Flags == nil.
+				flagsFound := false
+				seen := false
+				for {
+					item := msg.Next()
+					if item == nil {
+						break
 					}
+					if flagData, ok := item.(imapclient.FetchItemDataFlags); ok {
+						flagsFound = true
+						for _, f := range flagData.Flags {
+							if f == imap.FlagSeen {
+								seen = true
+								break
+							}
+						}
+					}
+				}
+				if !flagsFound {
+					// No FLAGS item in this push; nothing to act on.
+					return
+				}
+				if seen {
+					return // message is (still) read — ignore
 				}
 				notify("message marked unread notification received")
 			},
