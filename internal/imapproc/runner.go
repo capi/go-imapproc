@@ -4,9 +4,16 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/emersion/go-imap/v2/imapclient"
 )
+
+// DefaultIdleRefreshInterval is the interval at which IMAP IDLE is
+// periodically refreshed (DONE + re-IDLE). RFC 2177 notes that servers may
+// drop an IDLE connection after 30 minutes; refreshing well before that limit
+// keeps the connection alive.
+const DefaultIdleRefreshInterval = 25 * time.Minute
 
 // Config holds all runtime settings used by the run loop. It mirrors the
 // fields from the CLI config that the imapproc package needs at runtime.
@@ -18,6 +25,15 @@ type Config struct {
 	OnSuccess OnSuccessAction
 	OnlyNew   bool
 	Once      bool
+
+	// IdleRefreshInterval is how often the IDLE command is refreshed by
+	// sending DONE and immediately re-issuing IDLE. A zero value uses
+	// DefaultIdleRefreshInterval.
+	IdleRefreshInterval time.Duration
+
+	// OnIdleEntered is an optional callback invoked each time IDLE is entered.
+	// It is intended for tests that need to observe the IDLE refresh cycle.
+	OnIdleEntered func()
 }
 
 // Run logs in, selects the configured mailbox, and then runs the
@@ -44,6 +60,11 @@ func Run(ctx context.Context, c *imapclient.Client, cfg Config, newMail <-chan s
 	program := cfg.Exec
 	var programArgs []string
 
+	refreshInterval := cfg.IdleRefreshInterval
+	if refreshInterval <= 0 {
+		refreshInterval = DefaultIdleRefreshInterval
+	}
+
 	// skipScan starts as true when OnlyNew is set, so the very first
 	// ProcessUnread pass is skipped. After the first IDLE wakeup (a new
 	// message arrived) we clear it so subsequent passes process normally.
@@ -61,7 +82,7 @@ func Run(ctx context.Context, c *imapclient.Client, cfg Config, newMail <-chan s
 			return nil
 		}
 
-		if err := Idle(ctx, c, newMail); err != nil {
+		if err := Idle(ctx, c, newMail, refreshInterval, cfg.OnIdleEntered); err != nil {
 			return err
 		}
 

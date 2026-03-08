@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
@@ -74,19 +75,30 @@ func NewUnilateralDataHandler(newMail chan<- struct{}) (*imapclient.UnilateralDa
 	return handler, notify
 }
 
-// Idle starts IMAP IDLE and blocks until the server sends a notification
-// (e.g. new mail) or ctx is cancelled. newMail, when non-nil, is a channel
-// that the UnilateralDataHandler signals on new EXISTS pushes; Idle sends
-// DONE and returns so the main loop can call ProcessUnread.
-func Idle(ctx context.Context, c *imapclient.Client, newMail <-chan struct{}) error {
+// Idle starts IMAP IDLE and blocks until a reason to wake occurs:
+//   - ctx is cancelled (shutdown).
+//   - newMail receives a value (new mail or flag-change notification).
+//   - refreshInterval elapses (periodic keepalive: send DONE, return so the
+//     caller re-enters Idle immediately).
+//   - The server terminates IDLE on its own.
+//
+// onEntered, if non-nil, is called each time IDLE is successfully started.
+// This hook exists for tests that need to count IDLE cycles.
+func Idle(ctx context.Context, c *imapclient.Client, newMail <-chan struct{}, refreshInterval time.Duration, onEntered func()) error {
 	log.Printf("entering IDLE")
 	idleCmd, err := c.Idle()
 	if err != nil {
 		return fmt.Errorf("idle: %w", err)
 	}
+	if onEntered != nil {
+		onEntered()
+	}
 
 	done := make(chan error, 1)
 	go func() { done <- idleCmd.Wait() }()
+
+	refresh := time.NewTimer(refreshInterval)
+	defer refresh.Stop()
 
 	select {
 	case <-ctx.Done():
@@ -99,6 +111,16 @@ func Idle(ctx context.Context, c *imapclient.Client, newMail <-chan struct{}) er
 	case <-newMail:
 		// A new message arrived via unilateral EXISTS push. Send DONE so the
 		// server ends IDLE, then let the main loop call ProcessUnread.
+		if err := idleCmd.Close(); err != nil {
+			return fmt.Errorf("idle close: %w", err)
+		}
+		<-done
+		return nil
+	case <-refresh.C:
+		// Periodic refresh: send DONE and return so the caller re-enters Idle.
+		// This prevents the server from dropping the connection after its own
+		// timeout (RFC 2177 recommends servers allow at least 30 minutes).
+		log.Printf("refreshing IDLE")
 		if err := idleCmd.Close(); err != nil {
 			return fmt.Errorf("idle close: %w", err)
 		}

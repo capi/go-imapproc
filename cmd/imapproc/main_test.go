@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // fullArgs returns a slice of flag args that satisfies all required fields.
@@ -310,5 +311,61 @@ only_new: false
 	}
 	if !cfg.OnlyNew {
 		t.Error("OnlyNew = false, want true when --only-new flag overrides config file")
+	}
+}
+
+func TestParseConfig_IdleRefreshIntervalDefault(t *testing.T) {
+	// Without --idle-refresh-interval, cfg.IdleRefreshInterval should be zero
+	// (the run loop applies the library default).
+	cfg, _, err := parseConfig(fullArgs(), io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.IdleRefreshInterval != 0 {
+		t.Errorf("IdleRefreshInterval = %v, want 0 (use library default)", cfg.IdleRefreshInterval)
+	}
+}
+
+func TestParseConfig_IdleRefreshIntervalFlag(t *testing.T) {
+	cfg, _, err := parseConfig(fullArgs("--idle-refresh-interval", "10m"), io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.IdleRefreshInterval != 10*time.Minute {
+		t.Errorf("IdleRefreshInterval = %v, want 10m", cfg.IdleRefreshInterval)
+	}
+}
+
+func TestParseConfig_IdleRefreshIntervalFromConfigFile(t *testing.T) {
+	path := writeYAML(t, `
+addr: imap.example.com:993
+user: bob
+pass: hunter2
+exec: /bin/handler
+idle_refresh_interval: 15m
+`)
+	cfg, _, err := parseConfig([]string{"--config", path}, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.IdleRefreshInterval != 15*time.Minute {
+		t.Errorf("IdleRefreshInterval = %v, want 15m", cfg.IdleRefreshInterval)
+	}
+}
+
+func TestParseConfig_IdleRefreshIntervalFlagOverridesConfigFile(t *testing.T) {
+	path := writeYAML(t, `
+addr: imap.example.com:993
+user: bob
+pass: hunter2
+exec: /bin/handler
+idle_refresh_interval: 15m
+`)
+	cfg, _, err := parseConfig([]string{"--config", path, "--idle-refresh-interval", "5m"}, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.IdleRefreshInterval != 5*time.Minute {
+		t.Errorf("IdleRefreshInterval = %v, want 5m (flag should override config)", cfg.IdleRefreshInterval)
 	}
 }

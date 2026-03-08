@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -27,18 +28,23 @@ type Config struct {
 	// Once processes all unread messages once and exits without entering IMAP
 	// IDLE. Useful for one-shot/cron-style invocations. Defaults to false.
 	Once bool `yaml:"once"`
+	// IdleRefreshInterval is how often the IDLE command is refreshed. A zero
+	// value means use the library default (25 minutes). Stored as a duration
+	// string in YAML (e.g. "25m").
+	IdleRefreshInterval time.Duration `yaml:"idle_refresh_interval"`
 }
 
 // toRunConfig converts the CLI Config into an imapproc.Config for the run loop.
 func (c *Config) toRunConfig() imapproc.Config {
 	return imapproc.Config{
-		User:      c.User,
-		Pass:      c.Pass,
-		Mailbox:   c.Mailbox,
-		Exec:      c.Exec,
-		OnSuccess: c.OnSuccess,
-		OnlyNew:   c.OnlyNew,
-		Once:      c.Once,
+		User:                c.User,
+		Pass:                c.Pass,
+		Mailbox:             c.Mailbox,
+		Exec:                c.Exec,
+		OnSuccess:           c.OnSuccess,
+		OnlyNew:             c.OnlyNew,
+		Once:                c.Once,
+		IdleRefreshInterval: c.IdleRefreshInterval,
 	}
 }
 

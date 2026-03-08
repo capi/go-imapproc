@@ -14,3 +14,11 @@ only_new: false
 # Process all unread messages once and exit without entering IMAP IDLE.
 # Useful for cron-style one-shot invocations.
 once: false
+
+# How often to refresh the IMAP IDLE connection (send DONE and re-issue IDLE).
+# RFC 2177 permits servers to drop an IDLE session after 30 minutes, so
+# refreshing before that limit keeps the connection alive.
+# Accepts Go duration strings: "25m", "20m30s", etc.
+# Default: 25m
+# idle_refresh_interval: 25m
+

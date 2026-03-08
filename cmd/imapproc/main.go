@@ -31,8 +31,8 @@ func main() {
 		log.Printf("using config file: %s", configPath)
 	}
 	r := cfg.redacted()
-	log.Printf("config: addr=%s user=%s mailbox=%s exec=%s on_success=%s only_new=%v once=%v password=%s",
-		r.Addr, r.User, r.Mailbox, r.Exec, r.OnSuccess, r.OnlyNew, r.Once, r.Pass)
+	log.Printf("config: addr=%s user=%s mailbox=%s exec=%s on_success=%s only_new=%v once=%v idle_refresh_interval=%s password=%s",
+		r.Addr, r.User, r.Mailbox, r.Exec, r.OnSuccess, r.OnlyNew, r.Once, r.IdleRefreshInterval, r.Pass)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -60,6 +60,7 @@ func parseConfig(args []string, w io.Writer) (*Config, string, error) {
 	help := fs.Bool("help", false, "Show this help text")
 	once := fs.Bool("once", false, "Process all unread messages once and exit (skip IDLE)")
 	onlyNew := fs.Bool("only-new", false, "Skip existing unread messages; only process messages that arrive via IMAP IDLE after startup")
+	idleRefreshInterval := fs.Duration("idle-refresh-interval", 0, fmt.Sprintf("How often to refresh IMAP IDLE (default: %s); must be a Go duration string, e.g. 20m", imapproc.DefaultIdleRefreshInterval))
 
 	fs.Usage = func() {
 		fmt.Fprintf(w, "Usage: imapproc [flags] [program [args...]]\n\n")
@@ -109,6 +110,11 @@ func parseConfig(args []string, w io.Writer) (*Config, string, error) {
 	}
 	if fs.Changed("once") {
 		cfg.Once = *once
+	}
+	// Duration flag: only override when explicitly set, so that a non-zero
+	// value from the config file is not silently replaced by 0.
+	if fs.Changed("idle-refresh-interval") {
+		cfg.IdleRefreshInterval = *idleRefreshInterval
 	}
 	// Positional args override --exec.
 	if fs.NArg() > 0 {
