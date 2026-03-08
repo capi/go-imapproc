@@ -7,27 +7,19 @@ import (
 	"path/filepath"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/capi/go-imapproc/internal/imapproc"
 )
 
-// OnSuccessAction controls what happens to a message after it is successfully
-// processed by the external program.
-type OnSuccessAction string
-
-const (
-	// OnSuccessSeen marks the message as \Seen (read). This is the default.
-	OnSuccessSeen OnSuccessAction = "seen"
-	// OnSuccessDelete expunges the message from the mailbox.
-	OnSuccessDelete OnSuccessAction = "delete"
-)
-
-// Config holds all runtime settings for imapproc.
+// Config holds all runtime settings for the imapproc CLI. It is the
+// authoritative representation after merging config-file values with CLI flags.
 type Config struct {
-	Addr      string          `yaml:"addr"`
-	User      string          `yaml:"user"`
-	Pass      string          `yaml:"pass"`
-	Mailbox   string          `yaml:"mailbox"`
-	Exec      string          `yaml:"exec"`
-	OnSuccess OnSuccessAction `yaml:"on_success"`
+	Addr      string                   `yaml:"addr"`
+	User      string                   `yaml:"user"`
+	Pass      string                   `yaml:"pass"`
+	Mailbox   string                   `yaml:"mailbox"`
+	Exec      string                   `yaml:"exec"`
+	OnSuccess imapproc.OnSuccessAction `yaml:"on_success"`
 	// OnlyNew skips the initial scan for pre-existing unread messages and only
 	// processes messages that arrive via IMAP IDLE after startup. Defaults to
 	// false.
@@ -35,6 +27,19 @@ type Config struct {
 	// Once processes all unread messages once and exits without entering IMAP
 	// IDLE. Useful for one-shot/cron-style invocations. Defaults to false.
 	Once bool `yaml:"once"`
+}
+
+// toRunConfig converts the CLI Config into an imapproc.Config for the run loop.
+func (c *Config) toRunConfig() imapproc.Config {
+	return imapproc.Config{
+		User:      c.User,
+		Pass:      c.Pass,
+		Mailbox:   c.Mailbox,
+		Exec:      c.Exec,
+		OnSuccess: c.OnSuccess,
+		OnlyNew:   c.OnlyNew,
+		Once:      c.Once,
+	}
 }
 
 // defaultConfigPaths returns the ordered list of candidate config file locations.
@@ -108,10 +113,10 @@ func (c *Config) validate() error {
 		return fmt.Errorf("missing required settings: %v (set in config file or via flags)", missing)
 	}
 	switch c.OnSuccess {
-	case OnSuccessSeen, OnSuccessDelete:
+	case imapproc.OnSuccessSeen, imapproc.OnSuccessDelete:
 		// valid
 	default:
-		return fmt.Errorf("invalid on_success value %q: must be %q or %q", c.OnSuccess, OnSuccessSeen, OnSuccessDelete)
+		return fmt.Errorf("invalid on_success value %q: must be %q or %q", c.OnSuccess, imapproc.OnSuccessSeen, imapproc.OnSuccessDelete)
 	}
 	return nil
 }
