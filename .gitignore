@@ -4,6 +4,8 @@
 bin/
 imapproc
 
+# local config file
+imapproc.yaml
 
 # Go test cache and coverage
 *.test
