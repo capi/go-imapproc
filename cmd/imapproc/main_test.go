@@ -256,64 +256,6 @@ once: false
 	}
 }
 
-func TestParseConfig_OnlyNewFlag(t *testing.T) {
-	// --only-new should set cfg.OnlyNew = true.
-	cfg, _, err := parseConfig(fullArgs("--only-new"), io.Discard)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !cfg.OnlyNew {
-		t.Error("OnlyNew = false, want true when --only-new is passed")
-	}
-}
-
-func TestParseConfig_OnlyNewFlagDefault(t *testing.T) {
-	// Without --only-new, cfg.OnlyNew should be false.
-	cfg, _, err := parseConfig(fullArgs(), io.Discard)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.OnlyNew {
-		t.Error("OnlyNew = true, want false when --only-new is not passed")
-	}
-}
-
-func TestParseConfig_OnlyNewFromConfigFile(t *testing.T) {
-	// only_new: true in the config file should set cfg.OnlyNew = true.
-	path := writeYAML(t, `
-addr: imap.example.com:993
-user: bob
-pass: hunter2
-exec: /bin/handler
-only_new: true
-`)
-	cfg, _, err := parseConfig([]string{"--config", path}, io.Discard)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !cfg.OnlyNew {
-		t.Error("OnlyNew = false, want true when only_new is set in config file")
-	}
-}
-
-func TestParseConfig_OnlyNewFlagOverridesConfigFile(t *testing.T) {
-	// --only-new flag should override only_new: false in the config file.
-	path := writeYAML(t, `
-addr: imap.example.com:993
-user: bob
-pass: hunter2
-exec: /bin/handler
-only_new: false
-`)
-	cfg, _, err := parseConfig([]string{"--config", path, "--only-new"}, io.Discard)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !cfg.OnlyNew {
-		t.Error("OnlyNew = false, want true when --only-new flag overrides config file")
-	}
-}
-
 func TestParseConfig_IdleRefreshIntervalDefault(t *testing.T) {
 	// Without --idle-refresh-interval, cfg.IdleRefreshInterval should be zero
 	// (the run loop applies the library default).

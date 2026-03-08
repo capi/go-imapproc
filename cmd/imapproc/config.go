@@ -21,10 +21,6 @@ type Config struct {
 	Mailbox   string                   `yaml:"mailbox"`
 	Exec      string                   `yaml:"exec"`
 	OnSuccess imapproc.OnSuccessAction `yaml:"on_success"`
-	// OnlyNew skips the initial scan for pre-existing unread messages and only
-	// processes messages that arrive via IMAP IDLE after startup. Defaults to
-	// false.
-	OnlyNew bool `yaml:"only_new"`
 	// Once processes all unread messages once and exits without entering IMAP
 	// IDLE. Useful for one-shot/cron-style invocations. Defaults to false.
 	Once bool `yaml:"once"`
@@ -42,7 +38,6 @@ func (c *Config) toRunConfig() imapproc.Config {
 		Mailbox:             c.Mailbox,
 		Exec:                c.Exec,
 		OnSuccess:           c.OnSuccess,
-		OnlyNew:             c.OnlyNew,
 		Once:                c.Once,
 		IdleRefreshInterval: c.IdleRefreshInterval,
 	}

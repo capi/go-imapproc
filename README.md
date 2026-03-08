@@ -41,10 +41,6 @@ exec: /usr/local/bin/process-email
 # Action after successful processing: "seen" (default) or "delete"
 on_success: seen
 
-# Only process messages that arrive after startup via IMAP IDLE;
-# skip the initial scan for pre-existing unread messages.
-only_new: false
-
 # Process all unread messages once and exit without entering IMAP IDLE.
 # Useful for cron-style one-shot invocations.
 once: false
@@ -60,8 +56,6 @@ once: false
 --mailbox string     Mailbox to monitor (default: INBOX)
 --exec string        Program to run for each unread message
 --on-success string  Action on success: "seen" (default) or "delete"
---only-new           Skip existing unread messages; only process messages
-                     that arrive via IMAP IDLE after startup
 --once               Process all unread messages once and exit (skip IDLE)
 ```
 
@@ -81,16 +75,12 @@ imapproc /usr/local/bin/process-email arg1 arg2
 
 # One-shot: process current unread messages and exit (no IDLE loop)
 imapproc --once
-
-# Skip pre-existing messages; only handle new arrivals
-imapproc --only-new
 ```
 
 ## How It Works
 
 1. Connects to the IMAP server and authenticates
 2. Searches for all unread messages in the specified mailbox
-   (skipped on the first pass when `only_new` is set)
 3. For each unread message, pipes the raw RFC822 content to your program
 4. On success (exit code 0), performs the configured `on_success` action
    (`seen`: marks as read; `delete`: expunges the message)

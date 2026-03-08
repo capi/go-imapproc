@@ -23,7 +23,6 @@ type Config struct {
 	Mailbox   string
 	Exec      string
 	OnSuccess OnSuccessAction
-	OnlyNew   bool
 	Once      bool
 
 	// IdleRefreshInterval is how often the IDLE command is refreshed by
@@ -65,18 +64,10 @@ func Run(ctx context.Context, c *imapclient.Client, cfg Config, newMail <-chan s
 		refreshInterval = DefaultIdleRefreshInterval
 	}
 
-	// skipScan starts as true when OnlyNew is set, so the very first
-	// ProcessUnread pass is skipped. After the first IDLE wakeup (a new
-	// message arrived) we clear it so subsequent passes process normally.
-	skipScan := cfg.OnlyNew
-
 	for {
-		if !skipScan {
-			if err := ProcessUnread(c, program, programArgs, cfg.OnSuccess); err != nil {
-				return err
-			}
+		if err := ProcessUnread(c, program, programArgs, cfg.OnSuccess); err != nil {
+			return err
 		}
-		skipScan = false
 
 		if cfg.Once || ctx.Err() != nil {
 			return nil

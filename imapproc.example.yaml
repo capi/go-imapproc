@@ -7,10 +7,6 @@ exec: /usr/local/bin/process-email
 # Action after successful processing: "seen" (default) or "delete"
 on_success: seen
 
-# Only process messages that arrive after startup via IMAP IDLE;
-# skip the initial scan for pre-existing unread messages.
-only_new: false
-
 # Process all unread messages once and exit without entering IMAP IDLE.
 # Useful for cron-style one-shot invocations.
 once: false

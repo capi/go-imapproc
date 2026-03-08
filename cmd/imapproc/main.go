@@ -31,8 +31,8 @@ func main() {
 		log.Printf("using config file: %s", configPath)
 	}
 	r := cfg.redacted()
-	log.Printf("config: addr=%s user=%s mailbox=%s exec=%s on_success=%s only_new=%v once=%v idle_refresh_interval=%s password=%s",
-		r.Addr, r.User, r.Mailbox, r.Exec, r.OnSuccess, r.OnlyNew, r.Once, r.IdleRefreshInterval, r.Pass)
+	log.Printf("config: addr=%s user=%s mailbox=%s exec=%s on_success=%s once=%v idle_refresh_interval=%s password=%s",
+		r.Addr, r.User, r.Mailbox, r.Exec, r.OnSuccess, r.Once, r.IdleRefreshInterval, r.Pass)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -59,7 +59,6 @@ func parseConfig(args []string, w io.Writer) (*Config, string, error) {
 	onSuccess := fs.String("on-success", "", `Action on successful processing: "seen" (default) or "delete"`)
 	help := fs.Bool("help", false, "Show this help text")
 	once := fs.Bool("once", false, "Process all unread messages once and exit (skip IDLE)")
-	onlyNew := fs.Bool("only-new", false, "Skip existing unread messages; only process messages that arrive via IMAP IDLE after startup")
 	idleRefreshInterval := fs.Duration("idle-refresh-interval", 0, fmt.Sprintf("How often to refresh IMAP IDLE (default: %s); must be a Go duration string, e.g. 20m", imapproc.DefaultIdleRefreshInterval))
 
 	fs.Usage = func() {
@@ -105,9 +104,6 @@ func parseConfig(args []string, w io.Writer) (*Config, string, error) {
 	// Boolean flags: only override the config file when explicitly set on the
 	// command line (i.e. the flag was actually passed), so that a true value in
 	// the config file is not silently clobbered by the flag's zero value.
-	if fs.Changed("only-new") {
-		cfg.OnlyNew = *onlyNew
-	}
 	if fs.Changed("once") {
 		cfg.Once = *once
 	}
