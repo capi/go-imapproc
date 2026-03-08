@@ -162,7 +162,7 @@ func runOnceCfg(t *testing.T, addr string, cfg *Config) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	return runWithClient(ctx, c, cfg)
+	return runWithClient(ctx, c, cfg, nil)
 }
 
 // countMessages opens a fresh client connection and returns the total number
@@ -357,7 +357,7 @@ func TestIntegration_ContextCancelledBeforeIdle(t *testing.T) {
 		Mailbox: testMailbox,
 		Exec:    script,
 	}
-	if err := runWithClient(ctx, c, cfg); err != nil {
+	if err := runWithClient(ctx, c, cfg, nil); err != nil {
 		t.Fatalf("unexpected error on cancelled context: %v", err)
 	}
 }
@@ -471,7 +471,7 @@ func TestIntegration_OnceFlag(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- runWithClient(ctx, c, cfg)
+		done <- runWithClient(ctx, c, cfg, nil)
 	}()
 
 	select {
@@ -534,9 +534,7 @@ func TestIntegration_OnlyNew_SkipsExistingUnread(t *testing.T) {
 // true, messages that arrive after the initial IDLE entry ARE processed on the
 // next processUnread pass (i.e. the skip-scan flag is only applied once).
 //
-// Because the in-process imapmemserver does not terminate IDLE when new
-// messages arrive (it only sends unilateral EXISTS notifications), we simulate
-// a "second pass" by running two sequential runWithClient calls:
+// We simulate a "second pass" by running two sequential runWithClient calls:
 //   - First call: OnlyNew=true, context already cancelled — verifies that the
 //     pre-existing message is NOT processed.
 //   - Second call: OnlyNew=false (default), context already cancelled — verifies
@@ -584,5 +582,80 @@ func TestIntegration_OnlyNew_ProcessesNewArrival(t *testing.T) {
 	}
 	if n := countUnread(t, addr, testMailbox); n != 0 {
 		t.Errorf("after normal run: expected 0 unread, got %d", n)
+	}
+}
+
+// TestIntegration_IdleWakesOnNewMail verifies that when the server pushes a
+// unilateral EXISTS notification during IDLE, runWithClient wakes up, exits
+// IDLE, processes the newly arrived message, and then re-enters IDLE.
+//
+// The test uses the newMail channel directly (bypassing TLS dial) to simulate
+// what the UnilateralDataHandler does in production: it sends to newMail
+// whenever the server pushes NumMessages during IDLE.
+func TestIntegration_IdleWakesOnNewMail(t *testing.T) {
+	_, user, addr := newTestServer(t)
+
+	captureDir := t.TempDir()
+	captureFile := filepath.Join(captureDir, "captured.txt")
+	script := writeTempScript(t, "cat >> "+captureFile)
+
+	cfg := &Config{
+		Addr:      addr,
+		User:      testUser,
+		Pass:      testPass,
+		Mailbox:   testMailbox,
+		Exec:      script,
+		OnSuccess: OnSuccessSeen,
+	}
+
+	newMail := make(chan struct{}, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	c := dialInsecure(t, addr)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runWithClient(ctx, c, cfg, newMail)
+	}()
+
+	// Wait a moment for the initial processUnread pass to complete and for
+	// runWithClient to enter IDLE (mailbox is empty so it enters IDLE quickly).
+	time.Sleep(200 * time.Millisecond)
+
+	// Deliver a new message to the mailbox to simulate an incoming email.
+	appendMessage(t, user, testMailbox, testRawEmail)
+
+	// Signal the newMail channel as the UnilateralDataHandler would.
+	newMail <- struct{}{}
+
+	// Allow time for IDLE to wake, processUnread to run, and the program to execute.
+	time.Sleep(500 * time.Millisecond)
+
+	// Cancel the context to shut down cleanly.
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runWithClient returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runWithClient did not return after context cancellation")
+	}
+
+	// The message must have been delivered to the program.
+	got, err := os.ReadFile(captureFile)
+	if err != nil {
+		t.Fatalf("reading capture file: %v", err)
+	}
+	if !strings.Contains(string(got), "Hello, world!") {
+		t.Errorf("expected program to receive new message, but capture file contents:\n%s", got)
+	}
+
+	// The message must have been marked as read.
+	if n := countUnread(t, addr, testMailbox); n != 0 {
+		t.Errorf("expected 0 unread after IDLE wakeup processing, got %d", n)
 	}
 }

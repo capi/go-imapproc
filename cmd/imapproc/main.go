@@ -141,6 +141,12 @@ func parseConfig(args []string, w io.Writer) (*Config, string, error) {
 // uses IDLE to wait for new ones until ctx is cancelled. When cfg.Once is true,
 // it exits after the first processUnread pass without entering IDLE.
 func run(ctx context.Context, cfg *Config) error {
+	// newMail is closed by the UnilateralDataHandler whenever the server pushes
+	// a NumMessages update (EXISTS response) during IDLE, signalling that new
+	// mail has arrived. idle() listens on this channel and sends DONE to break
+	// out of IDLE so the main loop can call processUnread.
+	newMail := make(chan struct{}, 1)
+
 	options := &imapclient.Options{
 		UnilateralDataHandler: &imapclient.UnilateralDataHandler{
 			// Mailbox is called when the server pushes a mailbox status update,
@@ -148,6 +154,10 @@ func run(ctx context.Context, cfg *Config) error {
 			Mailbox: func(data *imapclient.UnilateralDataMailbox) {
 				if data.NumMessages != nil {
 					log.Printf("new message notification received")
+					select {
+					case newMail <- struct{}{}:
+					default:
+					}
 				}
 			},
 		},
@@ -160,7 +170,7 @@ func run(ctx context.Context, cfg *Config) error {
 	}
 	defer c.Close()
 
-	return runWithClient(ctx, c, cfg)
+	return runWithClient(ctx, c, cfg, newMail)
 }
 
 // runWithClient logs in, selects the configured mailbox, and then runs the
@@ -168,7 +178,10 @@ func run(ctx context.Context, cfg *Config) error {
 // IMAP client. Separating dial from logic enables integration tests to inject
 // a plain-TCP in-process client without TLS. When cfg.Once is true, the
 // function returns after the first processUnread pass without entering IDLE.
-func runWithClient(ctx context.Context, c *imapclient.Client, cfg *Config) error {
+// newMail is a channel that receives a value whenever the server pushes a new
+// message notification during IDLE; pass nil to disable IDLE wakeup (tests
+// that cancel the context before IDLE don't need it).
+func runWithClient(ctx context.Context, c *imapclient.Client, cfg *Config, newMail <-chan struct{}) error {
 	if err := c.Login(cfg.User, cfg.Pass).Wait(); err != nil {
 		return fmt.Errorf("login: %w", err)
 	}
@@ -198,7 +211,7 @@ func runWithClient(ctx context.Context, c *imapclient.Client, cfg *Config) error
 			return nil
 		}
 
-		if err := idle(ctx, c); err != nil {
+		if err := idle(ctx, c, newMail); err != nil {
 			return err
 		}
 
@@ -326,8 +339,10 @@ func processMessage(c *imapclient.Client, uid imap.UID, program string, programA
 }
 
 // idle starts IMAP IDLE and blocks until the server sends a notification
-// (e.g. new mail) or ctx is cancelled.
-func idle(ctx context.Context, c *imapclient.Client) error {
+// (e.g. new mail) or ctx is cancelled. newMail, when non-nil, is a channel
+// that the UnilateralDataHandler signals on new EXISTS pushes; idle() sends
+// DONE and returns so the main loop can call processUnread.
+func idle(ctx context.Context, c *imapclient.Client, newMail <-chan struct{}) error {
 	log.Printf("entering IDLE")
 	idleCmd, err := c.Idle()
 	if err != nil {
@@ -345,8 +360,16 @@ func idle(ctx context.Context, c *imapclient.Client) error {
 		}
 		<-done
 		return nil
+	case <-newMail:
+		// A new message arrived via unilateral EXISTS push. Send DONE so the
+		// server ends IDLE, then let the main loop call processUnread.
+		if err := idleCmd.Close(); err != nil {
+			return fmt.Errorf("idle close: %w", err)
+		}
+		<-done
+		return nil
 	case err := <-done:
-		// Server terminated IDLE (e.g. new mail notification).
+		// Server terminated IDLE (e.g. timeout).
 		if err != nil {
 			return fmt.Errorf("idle: %w", err)
 		}
