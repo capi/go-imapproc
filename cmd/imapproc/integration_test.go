@@ -659,3 +659,105 @@ func TestIntegration_IdleWakesOnNewMail(t *testing.T) {
 		t.Errorf("expected 0 unread after IDLE wakeup processing, got %d", n)
 	}
 }
+
+// TestIntegration_IdleWakesOnFlagChange verifies that when a message is marked
+// unread (\\Seen flag removed) during IDLE, runWithClient wakes up, exits IDLE,
+// and processes the now-unread message.
+//
+// The test uses the newMail channel directly to simulate what the
+// UnilateralDataHandler.Fetch callback does: it signals newMail when it sees a
+// flag push without \\Seen.
+func TestIntegration_IdleWakesOnFlagChange(t *testing.T) {
+	_, user, addr := newTestServer(t)
+
+	// Seed a message that is already read.
+	appendMessage(t, user, testMailbox, testRawEmail, imap.FlagSeen)
+
+	captureDir := t.TempDir()
+	captureFile := filepath.Join(captureDir, "captured.txt")
+	script := writeTempScript(t, "cat >> "+captureFile)
+
+	cfg := &Config{
+		Addr:      addr,
+		User:      testUser,
+		Pass:      testPass,
+		Mailbox:   testMailbox,
+		Exec:      script,
+		OnSuccess: OnSuccessSeen,
+	}
+
+	newMail := make(chan struct{}, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	c := dialInsecure(t, addr)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runWithClient(ctx, c, cfg, newMail)
+	}()
+
+	// Wait for the initial processUnread pass (no unread → enters IDLE quickly).
+	time.Sleep(200 * time.Millisecond)
+
+	// Mark the message as unread via a separate client, simulating an external
+	// client removing the \Seen flag.
+	func() {
+		c2 := dialInsecure(t, addr)
+		if err := c2.Login(testUser, testPass).Wait(); err != nil {
+			t.Fatalf("c2 login: %v", err)
+		}
+		if _, err := c2.Select(testMailbox, nil).Wait(); err != nil {
+			t.Fatalf("c2 select: %v", err)
+		}
+		criteria := &imap.SearchCriteria{Flag: []imap.Flag{imap.FlagSeen}}
+		data, err := c2.UIDSearch(criteria, nil).Wait()
+		if err != nil {
+			t.Fatalf("c2 search: %v", err)
+		}
+		if len(data.AllUIDs()) == 0 {
+			t.Fatal("c2: no seen message to unmark")
+		}
+		uidSet := imap.UIDSetNum(data.AllUIDs()[0])
+		storeFlags := &imap.StoreFlags{
+			Op:    imap.StoreFlagsDel,
+			Flags: []imap.Flag{imap.FlagSeen},
+		}
+		if err := c2.Store(uidSet, storeFlags, nil).Close(); err != nil {
+			t.Fatalf("c2 store: %v", err)
+		}
+	}()
+
+	// Signal newMail as the UnilateralDataHandler.Fetch callback would when it
+	// sees the flag push without \Seen.
+	newMail <- struct{}{}
+
+	// Allow time for IDLE to wake and processUnread to run.
+	time.Sleep(500 * time.Millisecond)
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runWithClient returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runWithClient did not return after context cancellation")
+	}
+
+	// The now-unread message must have been delivered to the program.
+	got, err := os.ReadFile(captureFile)
+	if err != nil {
+		t.Fatalf("reading capture file: %v", err)
+	}
+	if !strings.Contains(string(got), "Hello, world!") {
+		t.Errorf("expected program to receive re-unread message, capture file:\n%s", got)
+	}
+
+	// After processing, the message must be marked read again.
+	if n := countUnread(t, addr, testMailbox); n != 0 {
+		t.Errorf("expected 0 unread after flag-change wakeup processing, got %d", n)
+	}
+}

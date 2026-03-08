@@ -141,11 +141,21 @@ func parseConfig(args []string, w io.Writer) (*Config, string, error) {
 // uses IDLE to wait for new ones until ctx is cancelled. When cfg.Once is true,
 // it exits after the first processUnread pass without entering IDLE.
 func run(ctx context.Context, cfg *Config) error {
-	// newMail is closed by the UnilateralDataHandler whenever the server pushes
-	// a NumMessages update (EXISTS response) during IDLE, signalling that new
-	// mail has arrived. idle() listens on this channel and sends DONE to break
-	// out of IDLE so the main loop can call processUnread.
+	// newMail receives a value whenever the server pushes a notification during
+	// IDLE that warrants a processUnread pass: either a new message has arrived
+	// (EXISTS / NumMessages push) or an existing message has been marked unread
+	// (unilateral FETCH FLAGS without \Seen). idle() listens on this channel
+	// and sends DONE to break out of IDLE so the main loop can respond.
 	newMail := make(chan struct{}, 1)
+
+	// notify sends to newMail without blocking; safe to call from the handler.
+	notify := func(reason string) {
+		log.Printf("%s", reason)
+		select {
+		case newMail <- struct{}{}:
+		default:
+		}
+	}
 
 	options := &imapclient.Options{
 		UnilateralDataHandler: &imapclient.UnilateralDataHandler{
@@ -153,12 +163,28 @@ func run(ctx context.Context, cfg *Config) error {
 			// such as a new message arriving during IDLE.
 			Mailbox: func(data *imapclient.UnilateralDataMailbox) {
 				if data.NumMessages != nil {
-					log.Printf("new message notification received")
-					select {
-					case newMail <- struct{}{}:
-					default:
+					notify("new message notification received")
+				}
+			},
+			// Fetch is called when the server pushes an unsolicited FETCH
+			// response, typically to report flag changes on an existing message.
+			// If the updated flags do not include \Seen the message is (now)
+			// unread and we should process it.
+			Fetch: func(msg *imapclient.FetchMessageData) {
+				buf, err := msg.Collect()
+				if err != nil {
+					return
+				}
+				if buf.Flags == nil {
+					// No flags in this push; nothing to act on.
+					return
+				}
+				for _, f := range buf.Flags {
+					if f == imap.FlagSeen {
+						return // message is (still) read — ignore
 					}
 				}
+				notify("message marked unread notification received")
 			},
 		},
 	}
