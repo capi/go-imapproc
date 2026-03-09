@@ -6,6 +6,10 @@ A lightweight Go daemon that monitors an IMAP mailbox, processes unread emails w
 
 `imapproc` connects to an IMAP server (e.g., Gmail), watches for new messages using IMAP IDLE, and invokes a custom executable for each unread email. The raw RFC822 message is piped to your program's stdin. If the program exits successfully (code 0), the email is marked as read (or deleted, if configured).
 
+## AI Usage Disclaimer
+
+This project was built using AI tools, but was closely monitored and tested throughout development. All commits by AI agents are clearly marked with the agent's name in the commit message. Significant effort has been invested in unit testing, integration testing, and manual testing to ensure code quality and reliability. This codebase was built for personal use and will be used to process and access personal emails and Gmail account data. I trust this code with my email infrastructure and personal data.
+
 ## Use Cases
 
 - Process incoming emails with custom logic
@@ -94,6 +98,10 @@ imapproc --once
 - Go 1.25+ (for building)
 - IMAP server access
 - For Gmail: [app-specific password](https://support.google.com/accounts/answer/185833)
+
+## Scripts
+
+The [`scripts/`](scripts/README.md) directory contains helper scripts designed to work with `imapproc` as `exec` handlers. These scripts read raw RFC 2822 emails from stdin and can be used to integrate `imapproc` with external systems and workflows.
 
 ## Testing
 
