@@ -141,6 +141,25 @@ func TestParseConfig_PositionalArgOverridesExec(t *testing.T) {
 	}
 }
 
+func TestParseConfig_PositionalArgsForwarded(t *testing.T) {
+	cfg, _, err := parseConfig(fullArgs("/bin/override", "arg1", "arg2"), io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Exec != "/bin/override" {
+		t.Errorf("exec = %q, want /bin/override", cfg.Exec)
+	}
+	want := []string{"arg1", "arg2"}
+	if len(cfg.ExecArgs) != len(want) {
+		t.Fatalf("ExecArgs = %v, want %v", cfg.ExecArgs, want)
+	}
+	for i, a := range want {
+		if cfg.ExecArgs[i] != a {
+			t.Errorf("ExecArgs[%d] = %q, want %q", i, cfg.ExecArgs[i], a)
+		}
+	}
+}
+
 func TestParseConfig_DefaultConfigFileUsed(t *testing.T) {
 	// Write a valid config to a temp dir and point the working directory there
 	// so the default search path picks it up.

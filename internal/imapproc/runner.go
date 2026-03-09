@@ -22,6 +22,7 @@ type Config struct {
 	Pass      string
 	Mailbox   string
 	Exec      string
+	ExecArgs  []string
 	OnSuccess OnSuccessAction
 	Once      bool
 
@@ -57,7 +58,7 @@ func Run(ctx context.Context, c *imapclient.Client, cfg Config, newMail <-chan s
 	}
 
 	program := cfg.Exec
-	var programArgs []string
+	programArgs := cfg.ExecArgs
 
 	refreshInterval := cfg.IdleRefreshInterval
 	if refreshInterval <= 0 {

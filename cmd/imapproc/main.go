@@ -115,6 +115,7 @@ func parseConfig(args []string, w io.Writer) (*Config, string, error) {
 	// Positional args override --exec.
 	if fs.NArg() > 0 {
 		cfg.Exec = fs.Args()[0]
+		cfg.ExecArgs = fs.Args()[1:]
 	}
 
 	// Apply defaults after merging.

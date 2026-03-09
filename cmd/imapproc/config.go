@@ -20,6 +20,7 @@ type Config struct {
 	Pass      string                   `yaml:"pass"`
 	Mailbox   string                   `yaml:"mailbox"`
 	Exec      string                   `yaml:"exec"`
+	ExecArgs  []string                 `yaml:"-"` // set from positional CLI args only
 	OnSuccess imapproc.OnSuccessAction `yaml:"on_success"`
 	// Once processes all unread messages once and exits without entering IMAP
 	// IDLE. Useful for one-shot/cron-style invocations. Defaults to false.
@@ -37,6 +38,7 @@ func (c *Config) toRunConfig() imapproc.Config {
 		Pass:                c.Pass,
 		Mailbox:             c.Mailbox,
 		Exec:                c.Exec,
+		ExecArgs:            c.ExecArgs,
 		OnSuccess:           c.OnSuccess,
 		Once:                c.Once,
 		IdleRefreshInterval: c.IdleRefreshInterval,

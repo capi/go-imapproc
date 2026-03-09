@@ -58,7 +58,9 @@ once: false
 --once               Process all unread messages once and exit (skip IDLE)
 ```
 
-CLI flags override config file values. Positional arguments override `--exec`.
+CLI flags override config file values. Positional arguments override `--exec`:
+the first positional argument is the program to run, and any additional
+positional arguments are passed as arguments to that program.
 
 ## Usage
 
