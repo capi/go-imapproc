@@ -2,7 +2,10 @@ BIN_DIR   := bin
 CMDS      := $(notdir $(wildcard cmd/*))
 BINS      := $(addprefix $(BIN_DIR)/,$(CMDS))
 
-.PHONY: all build check test vet lint fmt clean tidy
+REGISTRY   := ghcr.io/capi
+IMAGE_NAME := $(REGISTRY)/go-imapproc
+
+.PHONY: all build check test vet lint fmt clean tidy docker-slim docker-full
 
 all: build
 
@@ -35,3 +38,11 @@ tidy:
 ## clean: remove build artifacts
 clean:
 	rm -rf $(BIN_DIR)
+
+## docker-slim: build minimal Docker image (go-imapproc:latest-slim)
+docker-slim:
+	docker build -t $(IMAGE_NAME):latest-slim -f Dockerfile .
+
+## docker-full: build full Docker image with Python3/Node/gws (go-imapproc:latest-full)
+docker-full:
+	docker build -t $(IMAGE_NAME):latest-full -f Dockerfile.full .

@@ -7,4 +7,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ENV HOME=/home/vscode
 USER vscode
-RUN /bin/bash -lc "curl -fsSL https://opencode.ai/install | bash"
+# Note: gws is pinned to 0.9.0 due to a bug in later versions
+# (see https://github.com/googleworkspace/cli/issues/344).
+# New versions will be evaluated and updated as fixes are released.
+RUN /bin/bash -lc "npm install -g @googleworkspace/cli@0.9.0" && \
+    /bin/bash -lc "curl -fsSL https://opencode.ai/install | bash"
