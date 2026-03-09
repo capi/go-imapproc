@@ -314,6 +314,113 @@ idle_refresh_interval: 15m
 	}
 }
 
+func TestParseConfig_ExecStringFromConfigFile(t *testing.T) {
+	path := writeYAML(t, `
+addr: imap.example.com:993
+user: bob
+pass: hunter2
+exec: /bin/handler
+`)
+	cfg, _, err := parseConfig([]string{"--config", path}, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Exec != "/bin/handler" {
+		t.Errorf("exec = %q, want /bin/handler", cfg.Exec)
+	}
+	if len(cfg.ExecArgs) != 0 {
+		t.Errorf("ExecArgs = %v, want empty", cfg.ExecArgs)
+	}
+}
+
+func TestParseConfig_ExecSequenceFromConfigFile(t *testing.T) {
+	path := writeYAML(t, `
+addr: imap.example.com:993
+user: bob
+pass: hunter2
+exec: ["/bin/handler", "--verbose", "--tag", "inbox"]
+`)
+	cfg, _, err := parseConfig([]string{"--config", path}, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Exec != "/bin/handler" {
+		t.Errorf("exec = %q, want /bin/handler", cfg.Exec)
+	}
+	want := []string{"--verbose", "--tag", "inbox"}
+	if len(cfg.ExecArgs) != len(want) {
+		t.Fatalf("ExecArgs = %v, want %v", cfg.ExecArgs, want)
+	}
+	for i, a := range want {
+		if cfg.ExecArgs[i] != a {
+			t.Errorf("ExecArgs[%d] = %q, want %q", i, cfg.ExecArgs[i], a)
+		}
+	}
+}
+
+func TestParseConfig_ExecSequenceBlockStyle(t *testing.T) {
+	// YAML block sequence syntax should work identically.
+	path := writeYAML(t, `
+addr: imap.example.com:993
+user: bob
+pass: hunter2
+exec:
+  - /bin/handler
+  - --flag
+  - value
+`)
+	cfg, _, err := parseConfig([]string{"--config", path}, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Exec != "/bin/handler" {
+		t.Errorf("exec = %q, want /bin/handler", cfg.Exec)
+	}
+	want := []string{"--flag", "value"}
+	if len(cfg.ExecArgs) != len(want) {
+		t.Fatalf("ExecArgs = %v, want %v", cfg.ExecArgs, want)
+	}
+	for i, a := range want {
+		if cfg.ExecArgs[i] != a {
+			t.Errorf("ExecArgs[%d] = %q, want %q", i, cfg.ExecArgs[i], a)
+		}
+	}
+}
+
+func TestParseConfig_ExecEmptySequenceError(t *testing.T) {
+	path := writeYAML(t, `
+addr: imap.example.com:993
+user: bob
+pass: hunter2
+exec: []
+`)
+	_, _, err := parseConfig([]string{"--config", path}, io.Discard)
+	if err == nil {
+		t.Fatal("expected error for empty exec sequence, got nil")
+	}
+}
+
+func TestParseConfig_ExecSequencePositionalArgsOverride(t *testing.T) {
+	// Positional CLI args override the YAML exec entirely (exec and its args).
+	path := writeYAML(t, `
+addr: imap.example.com:993
+user: bob
+pass: hunter2
+exec: ["/bin/yaml-handler", "--from-yaml"]
+`)
+	cfg, _, err := parseConfig([]string{"--config", path, "/bin/cli-handler", "cli-arg"}, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Exec != "/bin/cli-handler" {
+		t.Errorf("exec = %q, want /bin/cli-handler (CLI positional should override)", cfg.Exec)
+	}
+	want := []string{"cli-arg"}
+	if len(cfg.ExecArgs) != len(want) || cfg.ExecArgs[0] != want[0] {
+		t.Errorf("ExecArgs = %v, want %v", cfg.ExecArgs, want)
+	}
+}
+
 func TestParseConfig_IdleRefreshIntervalFlagOverridesConfigFile(t *testing.T) {
 	path := writeYAML(t, `
 addr: imap.example.com:993

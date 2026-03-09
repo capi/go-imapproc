@@ -2,6 +2,15 @@ addr: imap.gmail.com:993
 user: you@gmail.com
 pass: your-app-password
 mailbox: INBOX
+# exec accepts either a plain string (executable only) or a sequence of strings
+# (executable followed by arguments), similar to the Docker CMD/ENTRYPOINT
+# convention:
+#
+#   exec: /usr/local/bin/process-email
+#   exec: ["/usr/local/bin/process-email", "--verbose", "--tag", "inbox"]
+#
+# Arguments can also be supplied on the command line after "--":
+#   imapproc -- /usr/local/bin/process-email --verbose
 exec: /usr/local/bin/process-email
 
 # Action after successful processing: "seen" (default) or "delete"

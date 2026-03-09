@@ -12,6 +12,42 @@ import (
 	"github.com/capi/go-imapproc/internal/imapproc"
 )
 
+// execValue holds the executable path and optional arguments parsed from the
+// YAML "exec" field. It accepts either a plain string (executable only) or a
+// sequence of strings (executable followed by arguments), mirroring the Docker
+// CMD / Dockerfile ENTRYPOINT convention.
+//
+//	exec: /usr/local/bin/process-email          # string form – no args
+//	exec: ["/usr/local/bin/process-email", "-v"] # sequence form – with args
+type execValue struct {
+	cmd  string   // executable path
+	args []string // optional arguments
+}
+
+// UnmarshalYAML implements yaml.Unmarshaler for execValue, accepting both a
+// scalar string and a sequence of strings.
+func (e *execValue) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.ScalarNode:
+		e.cmd = value.Value
+		e.args = nil
+		return nil
+	case yaml.SequenceNode:
+		var items []string
+		if err := value.Decode(&items); err != nil {
+			return fmt.Errorf("exec: %w", err)
+		}
+		if len(items) == 0 {
+			return fmt.Errorf("exec: sequence must not be empty")
+		}
+		e.cmd = items[0]
+		e.args = items[1:]
+		return nil
+	default:
+		return fmt.Errorf("exec: must be a string or a sequence of strings")
+	}
+}
+
 // Config holds all runtime settings for the imapproc CLI. It is the
 // authoritative representation after merging config-file values with CLI flags.
 type Config struct {
@@ -19,8 +55,8 @@ type Config struct {
 	User      string                   `yaml:"user"`
 	Pass      string                   `yaml:"pass"`
 	Mailbox   string                   `yaml:"mailbox"`
-	Exec      string                   `yaml:"exec"`
-	ExecArgs  []string                 `yaml:"-"` // set from positional CLI args only
+	Exec      string                   `yaml:"-"` // resolved executable; set from exec field or CLI flag/positional args
+	ExecArgs  []string                 `yaml:"-"` // resolved args; set from exec field or CLI positional args
 	OnSuccess imapproc.OnSuccessAction `yaml:"on_success"`
 	// Once processes all unread messages once and exits without entering IMAP
 	// IDLE. Useful for one-shot/cron-style invocations. Defaults to false.
@@ -68,6 +104,22 @@ func defaultConfigPaths() []string {
 	return paths
 }
 
+// yamlConfig is the on-disk YAML representation. It uses execValue for the
+// "exec" field so that both string and sequence forms are accepted.
+type yamlConfig struct {
+	Addr                  string                   `yaml:"addr"`
+	User                  string                   `yaml:"user"`
+	Pass                  string                   `yaml:"pass"`
+	Mailbox               string                   `yaml:"mailbox"`
+	Exec                  execValue                `yaml:"exec"`
+	OnSuccess             imapproc.OnSuccessAction `yaml:"on_success"`
+	Once                  bool                     `yaml:"once"`
+	IdleRefreshInterval   time.Duration            `yaml:"idle_refresh_interval"`
+	Reconnect             bool                     `yaml:"reconnect"`
+	ReconnectInitialDelay time.Duration            `yaml:"reconnect_initial_delay"`
+	ReconnectMaxDelay     time.Duration            `yaml:"reconnect_max_delay"`
+}
+
 // loadConfig reads and parses a YAML config file.
 func loadConfig(path string) (*Config, error) {
 	f, err := os.Open(path)
@@ -76,11 +128,25 @@ func loadConfig(path string) (*Config, error) {
 	}
 	defer f.Close()
 
-	var cfg Config
-	if err := yaml.NewDecoder(f).Decode(&cfg); err != nil {
+	var yc yamlConfig
+	if err := yaml.NewDecoder(f).Decode(&yc); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
-	return &cfg, nil
+	cfg := &Config{
+		Addr:                  yc.Addr,
+		User:                  yc.User,
+		Pass:                  yc.Pass,
+		Mailbox:               yc.Mailbox,
+		Exec:                  yc.Exec.cmd,
+		ExecArgs:              yc.Exec.args,
+		OnSuccess:             yc.OnSuccess,
+		Once:                  yc.Once,
+		IdleRefreshInterval:   yc.IdleRefreshInterval,
+		Reconnect:             yc.Reconnect,
+		ReconnectInitialDelay: yc.ReconnectInitialDelay,
+		ReconnectMaxDelay:     yc.ReconnectMaxDelay,
+	}
+	return cfg, nil
 }
 
 // findAndLoadConfig locates a config file using the given explicit path (may be
