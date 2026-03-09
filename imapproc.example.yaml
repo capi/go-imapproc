@@ -18,3 +18,21 @@ once: false
 # Default: 25m
 # idle_refresh_interval: 25m
 
+# Automatically reconnect when the connection is lost (e.g. IDLE dropped,
+# network outage) or when the initial connection fails at startup.
+# Retries use exponential backoff between reconnect_initial_delay and
+# reconnect_max_delay.
+# Default: false
+# reconnect: false
+
+# Starting backoff delay before the first reconnect attempt.
+# Doubles on each successive failure, up to reconnect_max_delay.
+# Accepts Go duration strings: "5s", "10s", etc.
+# Default: 5s
+# reconnect_initial_delay: 5s
+
+# Maximum backoff delay between reconnect attempts.
+# Accepts Go duration strings: "5m", "10m", etc.
+# Default: 5m
+# reconnect_max_delay: 5m
+

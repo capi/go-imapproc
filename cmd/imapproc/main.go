@@ -31,8 +31,21 @@ func main() {
 		log.Printf("using config file: %s", configPath)
 	}
 	r := cfg.redacted()
-	log.Printf("config: addr=%s user=%s mailbox=%s exec=%s on_success=%s once=%v idle_refresh_interval=%s password=%s",
-		r.Addr, r.User, r.Mailbox, r.Exec, r.OnSuccess, r.Once, r.IdleRefreshInterval, r.Pass)
+	reconnectInitialDelay := r.ReconnectInitialDelay
+	if reconnectInitialDelay == 0 {
+		reconnectInitialDelay = imapproc.DefaultReconnectInitialDelay
+	}
+	reconnectMaxDelay := r.ReconnectMaxDelay
+	if reconnectMaxDelay == 0 {
+		reconnectMaxDelay = imapproc.DefaultReconnectMaxDelay
+	}
+	idleRefreshInterval := r.IdleRefreshInterval
+	if idleRefreshInterval == 0 {
+		idleRefreshInterval = imapproc.DefaultIdleRefreshInterval
+	}
+	log.Printf("config: addr=%s user=%s mailbox=%s exec=%s on_success=%s once=%v idle_refresh_interval=%s reconnect=%v reconnect_initial_delay=%s reconnect_max_delay=%s password=%s",
+		r.Addr, r.User, r.Mailbox, r.Exec, r.OnSuccess, r.Once, idleRefreshInterval,
+		r.Reconnect, reconnectInitialDelay, reconnectMaxDelay, r.Pass)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -60,6 +73,9 @@ func parseConfig(args []string, w io.Writer) (*Config, string, error) {
 	help := fs.Bool("help", false, "Show this help text")
 	once := fs.Bool("once", false, "Process all unread messages once and exit (skip IDLE)")
 	idleRefreshInterval := fs.Duration("idle-refresh-interval", 0, fmt.Sprintf("How often to refresh IMAP IDLE (default: %s); must be a Go duration string, e.g. 20m", imapproc.DefaultIdleRefreshInterval))
+	reconnect := fs.Bool("reconnect", false, "Reconnect automatically when the connection is lost (default: false)")
+	reconnectInitialDelay := fs.Duration("reconnect-initial-delay", 0, fmt.Sprintf("Initial backoff delay before first reconnect attempt (default: %s)", imapproc.DefaultReconnectInitialDelay))
+	reconnectMaxDelay := fs.Duration("reconnect-max-delay", 0, fmt.Sprintf("Maximum backoff delay between reconnect attempts (default: %s)", imapproc.DefaultReconnectMaxDelay))
 
 	fs.Usage = func() {
 		fmt.Fprintf(w, "Usage: imapproc [flags] [program [args...]]\n\n")
@@ -112,6 +128,16 @@ func parseConfig(args []string, w io.Writer) (*Config, string, error) {
 	if fs.Changed("idle-refresh-interval") {
 		cfg.IdleRefreshInterval = *idleRefreshInterval
 	}
+	// Reconnect flags: only override when explicitly set on the command line.
+	if fs.Changed("reconnect") {
+		cfg.Reconnect = *reconnect
+	}
+	if fs.Changed("reconnect-initial-delay") {
+		cfg.ReconnectInitialDelay = *reconnectInitialDelay
+	}
+	if fs.Changed("reconnect-max-delay") {
+		cfg.ReconnectMaxDelay = *reconnectMaxDelay
+	}
 	// Positional args override --exec.
 	if fs.NArg() > 0 {
 		cfg.Exec = fs.Args()[0]
@@ -141,20 +167,36 @@ func parseConfig(args []string, w io.Writer) (*Config, string, error) {
 }
 
 // dial connects to the IMAP server over TLS and hands control to the run loop.
+// When cfg.Reconnect is true it wraps the entire connect+run sequence in
+// RunWithReconnect so that transient failures (unreachable server, login
+// failure, dropped IDLE connection) are retried with exponential backoff.
 func dial(ctx context.Context, cfg *Config) error {
-	newMail := make(chan struct{}, 1)
-	handler, _ := imapproc.NewUnilateralDataHandler(newMail)
+	reconnectCfg := imapproc.ReconnectConfig{
+		InitialDelay: cfg.ReconnectInitialDelay,
+		MaxDelay:     cfg.ReconnectMaxDelay,
+	}
+	runConfig := cfg.toRunConfig()
 
-	options := &imapclient.Options{
-		UnilateralDataHandler: handler,
+	attempt := func(ctx context.Context) error {
+		newMail := make(chan struct{}, 1)
+		handler, _ := imapproc.NewUnilateralDataHandler(newMail)
+
+		options := &imapclient.Options{
+			UnilateralDataHandler: handler,
+		}
+
+		log.Printf("connecting to %s", cfg.Addr)
+		c, err := imapclient.DialTLS(cfg.Addr, options)
+		if err != nil {
+			return fmt.Errorf("dial: %w", err)
+		}
+		defer c.Close()
+
+		return imapproc.Run(ctx, c, runConfig, newMail)
 	}
 
-	log.Printf("connecting to %s", cfg.Addr)
-	c, err := imapclient.DialTLS(cfg.Addr, options)
-	if err != nil {
-		return fmt.Errorf("dial: %w", err)
+	if cfg.Reconnect {
+		return imapproc.RunWithReconnect(ctx, reconnectCfg, attempt)
 	}
-	defer c.Close()
-
-	return imapproc.Run(ctx, c, cfg.toRunConfig(), newMail)
+	return attempt(ctx)
 }

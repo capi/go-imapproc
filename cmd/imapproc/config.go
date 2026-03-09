@@ -29,6 +29,19 @@ type Config struct {
 	// value means use the library default (25 minutes). Stored as a duration
 	// string in YAML (e.g. "25m").
 	IdleRefreshInterval time.Duration `yaml:"idle_refresh_interval"`
+
+	// Reconnect enables automatic reconnection when the connection is lost
+	// (during IDLE or initial connect). Defaults to false.
+	Reconnect bool `yaml:"reconnect"`
+
+	// ReconnectInitialDelay is the first backoff delay before the first retry.
+	// A zero value uses the library default (5s). Stored as a duration string
+	// in YAML (e.g. "5s").
+	ReconnectInitialDelay time.Duration `yaml:"reconnect_initial_delay"`
+
+	// ReconnectMaxDelay caps the exponential backoff delay. A zero value uses
+	// the library default (5m). Stored as a duration string in YAML (e.g. "5m").
+	ReconnectMaxDelay time.Duration `yaml:"reconnect_max_delay"`
 }
 
 // toRunConfig converts the CLI Config into an imapproc.Config for the run loop.
