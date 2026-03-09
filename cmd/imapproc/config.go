@@ -58,6 +58,9 @@ type Config struct {
 	Exec      string                   `yaml:"-"` // resolved executable; set from exec field or CLI flag/positional args
 	ExecArgs  []string                 `yaml:"-"` // resolved args; set from exec field or CLI positional args
 	OnSuccess imapproc.OnSuccessAction `yaml:"on_success"`
+	// OnSuccessTarget is the destination mailbox when OnSuccess is
+	// OnSuccessMove. Defaults to imapproc.DefaultMoveTarget ("Trash").
+	OnSuccessTarget string `yaml:"on_success_target"`
 	// Once processes all unread messages once and exits without entering IMAP
 	// IDLE. Useful for one-shot/cron-style invocations. Defaults to false.
 	Once bool `yaml:"once"`
@@ -89,6 +92,7 @@ func (c *Config) toRunConfig() imapproc.Config {
 		Exec:                c.Exec,
 		ExecArgs:            c.ExecArgs,
 		OnSuccess:           c.OnSuccess,
+		MoveTarget:          c.OnSuccessTarget,
 		Once:                c.Once,
 		IdleRefreshInterval: c.IdleRefreshInterval,
 	}
@@ -113,6 +117,7 @@ type yamlConfig struct {
 	Mailbox               string                   `yaml:"mailbox"`
 	Exec                  execValue                `yaml:"exec"`
 	OnSuccess             imapproc.OnSuccessAction `yaml:"on_success"`
+	OnSuccessTarget       string                   `yaml:"on_success_target"`
 	Once                  bool                     `yaml:"once"`
 	IdleRefreshInterval   time.Duration            `yaml:"idle_refresh_interval"`
 	Reconnect             bool                     `yaml:"reconnect"`
@@ -140,6 +145,7 @@ func loadConfig(path string) (*Config, error) {
 		Exec:                  yc.Exec.cmd,
 		ExecArgs:              yc.Exec.args,
 		OnSuccess:             yc.OnSuccess,
+		OnSuccessTarget:       yc.OnSuccessTarget,
 		Once:                  yc.Once,
 		IdleRefreshInterval:   yc.IdleRefreshInterval,
 		Reconnect:             yc.Reconnect,
@@ -197,8 +203,13 @@ func (c *Config) validate() error {
 	switch c.OnSuccess {
 	case imapproc.OnSuccessSeen, imapproc.OnSuccessDelete:
 		// valid
+	case imapproc.OnSuccessMove:
+		// Apply the default target folder when none was specified.
+		if c.OnSuccessTarget == "" {
+			c.OnSuccessTarget = imapproc.DefaultMoveTarget
+		}
 	default:
-		return fmt.Errorf("invalid on_success value %q: must be %q or %q", c.OnSuccess, imapproc.OnSuccessSeen, imapproc.OnSuccessDelete)
+		return fmt.Errorf("invalid on_success value %q: must be %q, %q, or %q", c.OnSuccess, imapproc.OnSuccessSeen, imapproc.OnSuccessDelete, imapproc.OnSuccessMove)
 	}
 	return nil
 }

@@ -13,8 +13,12 @@ mailbox: INBOX
 #   imapproc -- /usr/local/bin/process-email --verbose
 exec: /usr/local/bin/process-email
 
-# Action after successful processing: "seen" (default) or "delete"
+# Action after successful processing: "seen" (default), "delete", or "move"
 on_success: seen
+
+# When on_success is "move", the message is moved to this mailbox.
+# Defaults to "Trash" when not specified.
+# on_success_target: Trash
 
 # Process all unread messages once and exit without entering IMAP IDLE.
 # Useful for cron-style one-shot invocations.

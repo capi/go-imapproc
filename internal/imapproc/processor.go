@@ -22,11 +22,18 @@ const (
 	OnSuccessSeen OnSuccessAction = "seen"
 	// OnSuccessDelete expunges the message from the mailbox.
 	OnSuccessDelete OnSuccessAction = "delete"
+	// OnSuccessMove moves the message to the configured target mailbox.
+	// The target defaults to "Trash" when not specified.
+	OnSuccessMove OnSuccessAction = "move"
 )
+
+// DefaultMoveTarget is the mailbox used when OnSuccessMove is configured but
+// no explicit target folder is provided.
+const DefaultMoveTarget = "Trash"
 
 // ProcessUnread searches for all unread messages in the selected mailbox and
 // invokes the external program for each one.
-func ProcessUnread(c *imapclient.Client, program string, programArgs []string, onSuccess OnSuccessAction) error {
+func ProcessUnread(c *imapclient.Client, program string, programArgs []string, onSuccess OnSuccessAction, moveTarget string) error {
 	criteria := &imap.SearchCriteria{
 		// NotFlag \Seen means "unread"
 		NotFlag: []imap.Flag{imap.FlagSeen},
@@ -44,7 +51,7 @@ func ProcessUnread(c *imapclient.Client, program string, programArgs []string, o
 	log.Printf("found %d unread message(s)", len(uids))
 
 	for _, uid := range uids {
-		if err := processMessage(c, uid, program, programArgs, onSuccess); err != nil {
+		if err := processMessage(c, uid, program, programArgs, onSuccess, moveTarget); err != nil {
 			// Log and continue; a single message failure should not abort the run.
 			log.Printf("error processing UID %d: %v", uid, err)
 		}
@@ -54,8 +61,8 @@ func ProcessUnread(c *imapclient.Client, program string, programArgs []string, o
 
 // processMessage fetches the raw RFC822 content of a message, pipes it to the
 // external program, and on success performs the configured OnSuccess action
-// (mark as \Seen or delete).
-func processMessage(c *imapclient.Client, uid imap.UID, program string, programArgs []string, onSuccess OnSuccessAction) error {
+// (mark as \Seen, delete, or move).
+func processMessage(c *imapclient.Client, uid imap.UID, program string, programArgs []string, onSuccess OnSuccessAction, moveTarget string) error {
 	uidSet := imap.UIDSetNum(uid)
 	// Peek: true prevents the server from implicitly marking the message \Seen
 	// on fetch. We set \Seen explicitly only after the external program exits
@@ -111,12 +118,12 @@ func processMessage(c *imapclient.Client, uid imap.UID, program string, programA
 		return nil
 	}
 
-	return applyOnSuccess(c, uid, uidSet, onSuccess)
+	return applyOnSuccess(c, uid, uidSet, onSuccess, moveTarget)
 }
 
 // applyOnSuccess performs the configured post-processing action on a message
 // that was handled successfully.
-func applyOnSuccess(c *imapclient.Client, uid imap.UID, uidSet imap.UIDSet, onSuccess OnSuccessAction) error {
+func applyOnSuccess(c *imapclient.Client, uid imap.UID, uidSet imap.UIDSet, onSuccess OnSuccessAction, moveTarget string) error {
 	switch onSuccess {
 	case OnSuccessDelete:
 		// Mark as \Deleted and then expunge.
@@ -132,6 +139,27 @@ func applyOnSuccess(c *imapclient.Client, uid imap.UID, uidSet imap.UIDSet, onSu
 			return fmt.Errorf("UID %d: expunge: %w", uid, err)
 		}
 		log.Printf("UID %d: deleted", uid)
+	case OnSuccessMove:
+		// Mark as \Seen first so that a failed move does not leave the message
+		// unread in the source mailbox, which would cause it to be reprocessed
+		// on the next pass.
+		storeSeen := &imap.StoreFlags{
+			Op:     imap.StoreFlagsAdd,
+			Flags:  []imap.Flag{imap.FlagSeen},
+			Silent: true,
+		}
+		if err := c.Store(uidSet, storeSeen, nil).Close(); err != nil {
+			return fmt.Errorf("UID %d: mark as read before move: %w", uid, err)
+		}
+		// Move the message to the target mailbox.
+		target := moveTarget
+		if target == "" {
+			target = DefaultMoveTarget
+		}
+		if _, err := c.Move(uidSet, target).Wait(); err != nil {
+			return fmt.Errorf("UID %d: move to %q: %w", uid, target, err)
+		}
+		log.Printf("UID %d: moved to %q", uid, target)
 	default: // OnSuccessSeen
 		// Mark as read (\Seen).
 		storeFlags := &imap.StoreFlags{

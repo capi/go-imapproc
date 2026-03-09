@@ -43,8 +43,8 @@ func main() {
 	if idleRefreshInterval == 0 {
 		idleRefreshInterval = imapproc.DefaultIdleRefreshInterval
 	}
-	log.Printf("config: addr=%s user=%s mailbox=%s exec=%s on_success=%s once=%v idle_refresh_interval=%s reconnect=%v reconnect_initial_delay=%s reconnect_max_delay=%s password=%s",
-		r.Addr, r.User, r.Mailbox, r.Exec, r.OnSuccess, r.Once, idleRefreshInterval,
+	log.Printf("config: addr=%s user=%s mailbox=%s exec=%s on_success=%s on_success_target=%s once=%v idle_refresh_interval=%s reconnect=%v reconnect_initial_delay=%s reconnect_max_delay=%s password=%s",
+		r.Addr, r.User, r.Mailbox, r.Exec, r.OnSuccess, r.OnSuccessTarget, r.Once, idleRefreshInterval,
 		r.Reconnect, reconnectInitialDelay, reconnectMaxDelay, r.Pass)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

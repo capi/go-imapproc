@@ -24,7 +24,10 @@ type Config struct {
 	Exec      string
 	ExecArgs  []string
 	OnSuccess OnSuccessAction
-	Once      bool
+	// MoveTarget is the destination mailbox when OnSuccess is OnSuccessMove.
+	// Defaults to DefaultMoveTarget ("Trash") when empty.
+	MoveTarget string
+	Once       bool
 
 	// IdleRefreshInterval is how often the IDLE command is refreshed by
 	// sending DONE and immediately re-issuing IDLE. A zero value uses
@@ -66,7 +69,7 @@ func Run(ctx context.Context, c *imapclient.Client, cfg Config, newMail <-chan s
 	}
 
 	for {
-		if err := ProcessUnread(c, program, programArgs, cfg.OnSuccess); err != nil {
+		if err := ProcessUnread(c, program, programArgs, cfg.OnSuccess, cfg.MoveTarget); err != nil {
 			return err
 		}
 

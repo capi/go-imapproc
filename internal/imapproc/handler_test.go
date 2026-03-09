@@ -85,6 +85,7 @@ func TestOnSuccessActionConstants(t *testing.T) {
 	}{
 		{imapproc.OnSuccessSeen, "seen"},
 		{imapproc.OnSuccessDelete, "delete"},
+		{imapproc.OnSuccessMove, "move"},
 	}
 	for _, tt := range tests {
 		if string(tt.action) != tt.want {
