@@ -10,7 +10,6 @@ A lightweight Go daemon that monitors an IMAP mailbox, processes unread emails w
 
 - Process incoming emails with custom logic
 - Integrate with email workflows and automation systems
-- Filter and categorize emails using external tools
 - Build email-to-action pipelines
 
 ## Installation
@@ -46,7 +45,7 @@ on_success: seen
 once: false
 ```
 
-### Command-Line Flags
+### Important Command-Line Flags
 
 ```
 --config string      Path to config file
