@@ -41,7 +41,7 @@ pass: your-app-password
 mailbox: INBOX
 exec: /usr/local/bin/process-email
 
-# Action after successful processing: "seen" (default) or "delete"
+# Action after successful processing: "seen" (default), "delete", or "move"
 on_success: seen
 
 # Process all unread messages once and exit without entering IMAP IDLE.
@@ -52,19 +52,26 @@ once: false
 ### Important Command-Line Flags
 
 ```
---config string      Path to config file
---addr string        IMAP server address (e.g. imap.gmail.com:993)
---user string        IMAP username
---pass string        IMAP password
---mailbox string     Mailbox to monitor (default: INBOX)
---exec string        Program to run for each unread message
---on-success string  Action on success: "seen" (default) or "delete"
---once               Process all unread messages once and exit (skip IDLE)
+--config string                   Path to config file
+--addr string                     IMAP server address (e.g. imap.gmail.com:993)
+--user string                     IMAP username
+--pass string                     IMAP password
+--mailbox string                  Mailbox to monitor (default: INBOX)
+--exec string                     Program to run for each unread message
+--on-success string               Action on success: "seen" (default), "delete", or "move"
+--on-success-target string        Destination mailbox when --on-success=move (default: "Trash")
+--once                            Process all unread messages once and exit (skip IDLE)
+--idle-refresh-interval duration  How often to refresh IMAP IDLE (default: 25m)
+--reconnect                       Reconnect automatically when the connection is lost
+--reconnect-initial-delay dur     Initial backoff delay before first reconnect (default: 5s)
+--reconnect-max-delay duration    Maximum backoff delay between reconnects (default: 5m)
 ```
 
 CLI flags override config file values. Positional arguments override `--exec`:
 the first positional argument is the program to run, and any additional
 positional arguments are passed as arguments to that program.
+
+See [`imapproc.example.yaml`](imapproc.example.yaml) for all available options and their defaults.
 
 ## Usage
 
@@ -88,7 +95,7 @@ imapproc --once
 2. Searches for all unread messages in the specified mailbox
 3. For each unread message, pipes the raw RFC 2822 content to your program
 4. On success (exit code 0), performs the configured `on_success` action
-   (`seen`: marks as read; `delete`: expunges the message)
+   (`seen`: marks as read; `delete`: expunges the message; `move`: moves to target mailbox)
 5. If `once` is set, exits after the first pass without entering IDLE
 6. Otherwise, uses IMAP IDLE to efficiently wait for new messages
 7. Continues until interrupted (Ctrl-C or SIGTERM)
@@ -98,6 +105,13 @@ imapproc --once
 - Go 1.25+ (for building)
 - IMAP server access
 - For Gmail: [app-specific password](https://support.google.com/accounts/answer/185833)
+
+## Security
+
+- **Config file permissions** — the config file contains your IMAP password in plain text. Restrict access: `chmod 600 imapproc.yaml`.
+- **CLI password flag** — passing `--pass` on the command line exposes the password in the process list (`ps aux`). Prefer using a config file.
+- **Exec handler** — the subprocess invoked via `exec` runs with the same privileges as the daemon. Only point `exec` at scripts you trust.
+- **TLS** — connections to the IMAP server always use TLS; plain-text connections are not supported.
 
 ## Scripts
 
