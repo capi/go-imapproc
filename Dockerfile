@@ -12,6 +12,11 @@ RUN make check && mkdir -p /out && cp bin/imapproc /out/imapproc
 # Stage 2: Minimal runtime image
 FROM debian:trixie-slim
 
+LABEL org.opencontainers.image.title="imapproc" \
+      org.opencontainers.image.description="Lightweight Go daemon that monitors IMAP mailbox and processes unread emails with external scripts" \
+      org.opencontainers.image.url="https://github.com/capi/go-imapproc" \
+      org.opencontainers.image.source="https://github.com/capi/go-imapproc"
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/* \

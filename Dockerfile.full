@@ -12,6 +12,11 @@ RUN make check && mkdir -p /out && cp bin/imapproc /out/imapproc
 # Stage 2: Full runtime image with Python3, Node.js, and gws
 FROM debian:trixie-slim
 
+LABEL org.opencontainers.image.title="imapproc-full" \
+      org.opencontainers.image.description="imapproc with Python3, Node.js, npm, Google Workspace CLI and GMail importer script" \
+      org.opencontainers.image.url="https://github.com/capi/go-imapproc" \
+      org.opencontainers.image.source="https://github.com/capi/go-imapproc"
+
 # Install Python3, Node.js, and npm
 # Note: gws is pinned to 0.9.0 due to a bug in later versions
 # (see https://github.com/googleworkspace/cli/issues/344).
