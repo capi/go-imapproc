@@ -421,6 +421,34 @@ exec: ["/bin/yaml-handler", "--from-yaml"]
 	}
 }
 
+func TestParseConfig_OnSuccessTargetFlag(t *testing.T) {
+	cfg, _, err := parseConfig(fullArgs("--on-success", "move", "--on-success-target", "Archive"), io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.OnSuccessTarget != "Archive" {
+		t.Errorf("OnSuccessTarget = %q, want Archive", cfg.OnSuccessTarget)
+	}
+}
+
+func TestParseConfig_OnSuccessTargetFlagOverridesConfigFile(t *testing.T) {
+	path := writeYAML(t, `
+addr: imap.example.com:993
+user: bob
+pass: hunter2
+exec: /bin/handler
+on_success: move
+on_success_target: Trash
+`)
+	cfg, _, err := parseConfig([]string{"--config", path, "--on-success-target", "Archive"}, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.OnSuccessTarget != "Archive" {
+		t.Errorf("OnSuccessTarget = %q, want Archive (flag should override config)", cfg.OnSuccessTarget)
+	}
+}
+
 func TestParseConfig_IdleRefreshIntervalFlagOverridesConfigFile(t *testing.T) {
 	path := writeYAML(t, `
 addr: imap.example.com:993

@@ -69,7 +69,8 @@ func parseConfig(args []string, w io.Writer) (*Config, string, error) {
 	pass := fs.String("pass", "", "IMAP password")
 	mailbox := fs.String("mailbox", "", "Mailbox to monitor (default: INBOX)")
 	execProg := fs.String("exec", "", "Program to run for each unread message (receives raw email on stdin)")
-	onSuccess := fs.String("on-success", "", `Action on successful processing: "seen" (default) or "delete"`)
+	onSuccess := fs.String("on-success", "", `Action on successful processing: "seen" (default), "delete", or "move"`)
+	onSuccessTarget := fs.String("on-success-target", "", `Destination mailbox when --on-success=move (default: "Trash")`)
 	help := fs.Bool("help", false, "Show this help text")
 	once := fs.Bool("once", false, "Process all unread messages once and exit (skip IDLE)")
 	idleRefreshInterval := fs.Duration("idle-refresh-interval", 0, fmt.Sprintf("How often to refresh IMAP IDLE (default: %s); must be a Go duration string, e.g. 20m", imapproc.DefaultIdleRefreshInterval))
@@ -116,6 +117,9 @@ func parseConfig(args []string, w io.Writer) (*Config, string, error) {
 	}
 	if *onSuccess != "" {
 		cfg.OnSuccess = imapproc.OnSuccessAction(*onSuccess)
+	}
+	if *onSuccessTarget != "" {
+		cfg.OnSuccessTarget = *onSuccessTarget
 	}
 	// Boolean flags: only override the config file when explicitly set on the
 	// command line (i.e. the flag was actually passed), so that a true value in
