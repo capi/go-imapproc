@@ -1,0 +1,26 @@
+# Example docker-compose.yml for deploying go-imapproc:latest-full
+# Pulls emails from an IMAP mailbox and imports them to Gmail using gws.
+#
+# Setup:
+# 1. mkdir -p ./config/{imapproc,gws}
+# 2. chmod 750 ./config && chmod 750 ./config/{imapproc,gws}
+# 3. chown -R 1000:1000 ./config
+# 4. Place imapproc.yaml in ./config/imapproc/
+#
+# Authentication:
+# 1. On a machine with browser access, run: gws auth login
+# 2. Export credentials: gws auth export --unmasked > credentials.json
+# 3. Copy credentials.json to ./config/gws/credentials.json
+# 4. chown 1000:1000 ./config/gws/credentials.json
+
+services:
+  imapproc:
+    image: ghcr.io/capi/go-imapproc:latest-full
+    container_name: imapproc
+    restart: unless-stopped
+    volumes:
+      - ./config/imapproc/imapproc.yaml:/etc/imapproc/config.yaml:ro
+      # gws stores credentials and discovery cache here
+      - ./config/gws:/home/imapproc/.config/gws
+    environment:
+      - GOOGLE_WORKSPACE_CLI_CONFIG_DIR=/home/imapproc/.config/gws
