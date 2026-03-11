@@ -9,8 +9,17 @@ command-line argument.  Instead it:
 
        gws auth export --unmasked
 
-2. Exchanges the refresh_token for a fresh access token via the Google OAuth2
-   token endpoint (``https://oauth2.googleapis.com/token``).
+2. Obtains an access token, caching it in a local file to avoid unnecessary
+   token exchanges.  The cached token is re-used until it is older than
+   ``--token-rotation-interval`` minutes (default: 50), or until the Gmail API
+   returns a 401, whichever comes first.  On a 401 the token is refreshed once
+   and the request is retried; if the retry also fails the script exits with an
+   error.
+
+   The cache file is stored at ``~/.config/gws/imapproc-token-cache.json``
+   (configurable via ``--token-cache-file``) with mode 0600.  Concurrent
+   invocations co-ordinate via ``fcntl.flock()`` on the cache file so that
+   only one process refreshes the token at a time.
 
 3. Posts a ``multipart/related`` request directly to the Gmail REST API upload
    endpoint (``https://gmail.googleapis.com/upload/gmail/v1/...``) using
@@ -23,6 +32,8 @@ Identical to gws-import-to-gmail.py::
     exec: ["scripts/gws-import-to-gmail-direct.py"]
     exec: ["scripts/gws-import-to-gmail-direct.py", "--user", "alice@example.com"]
     exec: ["scripts/gws-import-to-gmail-direct.py", "--never-mark-spam"]
+    exec: ["scripts/gws-import-to-gmail-direct.py", "--token-rotation-interval", "30"]
+    exec: ["scripts/gws-import-to-gmail-direct.py", "--token-cache-file", "/run/secrets/gmail-token.json"]
 
 Prerequisites
 -------------
@@ -31,14 +42,32 @@ credentials are stored in the encrypted gws credential store.
 """
 
 import argparse
+import fcntl
 import json
 import os
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+
+# Default token cache location (inside the gws config directory so the same
+# volume/bind-mount covers both gws credentials and this cache).
+_DEFAULT_TOKEN_CACHE = os.path.expanduser("~/.config/gws/imapproc-token-cache.json")
+
+# Default number of minutes before proactively rotating the access token.
+_DEFAULT_ROTATION_MINUTES = 50
+
+
+# ---------------------------------------------------------------------------
+# Tracing
+# ---------------------------------------------------------------------------
+
+def _trace(msg: str) -> None:
+    """Print a trace line to stderr, prefixed with a marker for easy grepping."""
+    print(f"[gws-import] {msg}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +132,25 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=False,
         help="Print the HTTP request that would be sent without executing it.",
     )
+    parser.add_argument(
+        "--token-rotation-interval",
+        type=int,
+        default=_DEFAULT_ROTATION_MINUTES,
+        metavar="MINUTES",
+        help=(
+            f"Proactively rotate the cached access token after this many minutes "
+            f"(default: {_DEFAULT_ROTATION_MINUTES})."
+        ),
+    )
+    parser.add_argument(
+        "--token-cache-file",
+        default=_DEFAULT_TOKEN_CACHE,
+        metavar="PATH",
+        help=(
+            f"Path to the JSON file used to cache the access token "
+            f"(default: {_DEFAULT_TOKEN_CACHE})."
+        ),
+    )
     return parser
 
 
@@ -155,6 +203,7 @@ def exchange_refresh_token(
         "grant_type": "refresh_token",
     }).encode()
 
+    _trace(f"token: exchanging refresh_token at {token_endpoint}")
     req = urllib.request.Request(
         token_endpoint,
         data=payload,
@@ -173,17 +222,75 @@ def exchange_refresh_token(
         raise RuntimeError(
             f"Token endpoint did not return an access_token: {body}"
         )
+    _trace("token: new access token obtained")
     return body["access_token"]
 
 
-def get_access_token() -> str:
-    """Obtain a fresh access token using stored gws credentials.
+# ---------------------------------------------------------------------------
+# Token cache helpers
+# ---------------------------------------------------------------------------
 
-    Checks ``GOOGLE_WORKSPACE_CLI_TOKEN`` first so the caller can inject a
-    token directly (useful for testing and CI environments).
+def _ensure_cache_file(path: str) -> None:
+    """Create an empty cache file with mode 0600 if it does not exist yet.
+
+    We intentionally do not use O_EXCL / check-then-act atomically here
+    because we accept the race on first creation — the worst outcome is two
+    processes both writing an empty JSON object, which is harmless.
+    """
+    if not os.path.exists(path):
+        _trace(f"token cache: creating new cache file {path}")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, b"{}")
+        finally:
+            os.close(fd)
+
+
+def _load_cache(f) -> dict:
+    """Read JSON from an open (and locked) cache file handle.
+
+    Returns an empty dict if the file is empty or contains invalid JSON.
+    """
+    f.seek(0)
+    raw = f.read()
+    if not raw.strip():
+        return {}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+
+
+def _save_cache(path: str, data: dict) -> None:
+    """Write *data* to *path* atomically using a .new temp file, mode 0600."""
+    tmp_path = path + ".new"
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, json.dumps(data, indent=2).encode())
+    finally:
+        os.close(fd)
+    os.replace(tmp_path, path)
+
+
+def _is_token_fresh(cache: dict, rotation_minutes: int) -> bool:
+    """Return True if the cached token was obtained recently enough."""
+    obtained_at = cache.get("obtained_at")
+    access_token = cache.get("access_token")
+    if not obtained_at or not access_token:
+        return False
+    age_seconds = time.time() - obtained_at
+    return age_seconds < rotation_minutes * 60
+
+
+def _refresh_and_save(cache_path: str) -> str:
+    """Obtain a fresh access token, persist it, and return it.
+
+    Must be called while the caller holds the flock on the cache file.
     """
     env_token = os.environ.get("GOOGLE_WORKSPACE_CLI_TOKEN", "").strip()
     if env_token:
+        # Env-injected token: skip the cache entirely (useful for CI/testing).
+        _trace("token: using GOOGLE_WORKSPACE_CLI_TOKEN from environment")
         return env_token
 
     creds = load_gws_credentials()
@@ -193,11 +300,56 @@ def get_access_token() -> str:
             f"gws credentials are missing required fields: {missing}. "
             "Run 'gws auth login' to re-authenticate."
         )
-    return exchange_refresh_token(
+    token = exchange_refresh_token(
         creds["client_id"],
         creds["client_secret"],
         creds["refresh_token"],
     )
+    _save_cache(cache_path, {
+        "access_token": token,
+        "obtained_at": time.time(),
+    })
+    _trace(f"token: saved to cache {cache_path}")
+    return token
+
+
+def get_access_token(cache_path: str, rotation_minutes: int) -> str:
+    """Return a valid access token, using the on-disk cache when possible.
+
+    Checks ``GOOGLE_WORKSPACE_CLI_TOKEN`` first so the caller can inject a
+    token directly (useful for testing and CI environments).
+
+    Otherwise:
+    1. Ensures the cache file exists (creating an empty one if needed).
+    2. Acquires an exclusive flock on it.
+    3. Reads the cache; if the token is fresh enough, returns it immediately.
+    4. Otherwise refreshes the token via ``exchange_refresh_token``, persists
+       the new token, and returns it.
+
+    The flock is released when this function returns so that concurrent
+    invocations serialize their refresh attempts.
+    """
+    env_token = os.environ.get("GOOGLE_WORKSPACE_CLI_TOKEN", "").strip()
+    if env_token:
+        _trace("token: using GOOGLE_WORKSPACE_CLI_TOKEN from environment (cache skipped)")
+        return env_token
+
+    _ensure_cache_file(cache_path)
+
+    with open(cache_path, "r+") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            cache = _load_cache(f)
+            if _is_token_fresh(cache, rotation_minutes):
+                age_min = int((time.time() - cache["obtained_at"]) / 60)
+                _trace(f"token: reusing cached token (age {age_min}m, rotation {rotation_minutes}m)")
+                return cache["access_token"]
+            _trace(f"token: cached token absent or stale, refreshing (rotation {rotation_minutes}m)")
+            # Token is stale or absent — refresh under the lock so only one
+            # concurrent process does the exchange.
+            return _refresh_and_save(cache_path)
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
 
 
 # ---------------------------------------------------------------------------
@@ -236,11 +388,12 @@ def import_message(
     query_params: dict,
     *,
     api_base: str = "https://gmail.googleapis.com",
-) -> dict:
+) -> tuple[dict, bool]:
     """POST the email to the Gmail users.messages.import upload endpoint.
 
-    Returns the parsed JSON response body.  Raises ``RuntimeError`` on
-    non-2xx responses.
+    Returns ``(parsed_response, token_was_rejected)`` where
+    ``token_was_rejected`` is True when the server responded with 401.
+    Raises ``RuntimeError`` on non-2xx responses other than 401.
     """
     body, content_type = build_multipart_body(metadata, raw_email)
 
@@ -261,11 +414,18 @@ def import_message(
             "Content-Type": content_type,
         },
     )
+    _trace(f"api: POST {url}")
     try:
         with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read())
+            result = json.loads(resp.read())
+            _trace(f"api: success, message id={result.get('id', '?')}")
+            return result, False
     except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            _trace("api: 401 Unauthorized — token rejected")
+            return {}, True
         error_body = exc.read().decode(errors="replace")
+        _trace(f"api: error {exc.code}")
         # Print the API error to stdout so it is visible in imapproc logs,
         # matching the behaviour of gws which also writes its JSON output to
         # stdout.
@@ -273,6 +433,49 @@ def import_message(
         raise RuntimeError(
             f"Gmail API returned {exc.code}"
         ) from exc
+
+
+def import_message_with_retry(
+    cache_path: str,
+    rotation_minutes: int,
+    user_id: str,
+    metadata: dict,
+    raw_email: bytes,
+    query_params: dict,
+) -> dict:
+    """Import a message, refreshing the token once on 401.
+
+    1. Obtain (possibly cached) access token.
+    2. Attempt import.
+    3. On 401: force-refresh the token (under lock, with safe replace), retry.
+    4. On second 401 or any other error: raise ``RuntimeError``.
+    """
+    access_token = get_access_token(cache_path, rotation_minutes)
+    response, token_rejected = import_message(
+        access_token, user_id, metadata, raw_email, query_params
+    )
+    if not token_rejected:
+        return response
+
+    # Token was rejected — force a refresh under lock.
+    _trace("token: forcing refresh after 401, retrying request")
+    _ensure_cache_file(cache_path)
+    with open(cache_path, "r+") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            access_token = _refresh_and_save(cache_path)
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+    response, token_rejected = import_message(
+        access_token, user_id, metadata, raw_email, query_params
+    )
+    if token_rejected:
+        raise RuntimeError(
+            "Gmail API returned 401 even after token refresh; "
+            "check gws credentials."
+        )
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -314,9 +517,9 @@ def main() -> int:
         return 0
 
     try:
-        access_token = get_access_token()
-        response = import_message(
-            access_token,
+        response = import_message_with_retry(
+            args.token_cache_file,
+            args.token_rotation_interval,
             args.user,
             metadata,
             raw_email,

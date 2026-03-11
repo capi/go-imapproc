@@ -220,6 +220,21 @@ All options are identical to `gws-import-to-gmail.py` (see table above).
 |---|---|
 | `GOOGLE_WORKSPACE_CLI_TOKEN` | Pre-obtained OAuth2 access token. If set, the script uses this token directly without calling `gws auth export`. Useful for CI/CD pipelines. |
 
+### Token caching
+
+The script caches access tokens locally to avoid unnecessary token exchanges. Cached tokens are reused until they are older than `--token-rotation-interval` (default: 50 minutes) or rejected by the API (401).
+
+**Options**:
+- `--token-rotation-interval MINUTES` — Default: 50
+- `--token-cache-file PATH` — Default: `~/.config/gws/imapproc-token-cache.json`
+
+⚠️ **Security**: The cache file contains an active OAuth2 access token and is stored with mode `0600`. Ensure `~/.config/gws/` has appropriate permissions and is not world-readable.
+
+**Debugging**: Trace output goes to stderr with `[gws-import]` prefix:
+```bash
+imapproc 2>&1 | grep '\[gws-import\]'
+```
+
 ### Exit codes
 
 Same as `gws-import-to-gmail.py`:
