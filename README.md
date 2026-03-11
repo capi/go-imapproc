@@ -65,6 +65,8 @@ once: false
 --reconnect                       Reconnect automatically when the connection is lost
 --reconnect-initial-delay dur     Initial backoff delay before first reconnect (default: 5s)
 --reconnect-max-delay duration    Maximum backoff delay between reconnects (default: 5m)
+--web-enabled                     Enable the HTTP monitoring server
+--web-addr string                 Listen address for the monitoring server (default: :8080)
 ```
 
 CLI flags override config file values. Positional arguments override `--exec`:
@@ -112,6 +114,33 @@ imapproc --once
 - **CLI password flag** — passing `--pass` on the command line exposes the password in the process list (`ps aux`). Prefer using a config file.
 - **Exec handler** — the subprocess invoked via `exec` runs with the same privileges as the daemon. Only point `exec` at scripts you trust.
 - **TLS** — connections to the IMAP server always use TLS; plain-text connections are not supported.
+
+## Monitoring
+
+Enable the built-in HTTP server with `--web-enabled` (or `web_enabled: true` in the config file):
+
+```bash
+imapproc --web-enabled --web-addr :8080
+```
+
+**`GET /api/health`** — JSON health endpoint suitable for uptime monitors and health checks.
+
+- Returns **HTTP 200** when healthy, **HTTP 503** when unhealthy.
+- Reports connection status (`UP` / `DOWN`), the outcome of the last processing pass, and cumulative message counters.
+
+```json
+{
+  "status": "UP",
+  "details": {
+    "connection": { "status": "UP", "healthy": true },
+    "lastPoll": { "healthy": true, "timestamp": "2025-06-15T12:00:00Z",
+                  "messagesReceived": 3, "messagesSuccess": 3, "messagesFailed": 0 }
+  },
+  "stats": { "messagesReceived": 42, "messagesSuccess": 41, "messagesFailed": 1 }
+}
+```
+
+**`GET /`** — HTML status dashboard that auto-refreshes every 5 seconds.
 
 ## Scripts
 
