@@ -62,6 +62,7 @@ func RunWithReconnect(ctx context.Context, cfg ReconnectConfig, dialAndRun func(
 			return nil
 		}
 
+		start := time.Now()
 		err := dialAndRun(ctx)
 		if err == nil {
 			return nil
@@ -72,6 +73,12 @@ func RunWithReconnect(ctx context.Context, cfg ReconnectConfig, dialAndRun func(
 			return nil
 		}
 
+		// Reset backoff when the connection ran for a meaningful period,
+		// indicating it was successfully established before failing.
+		if time.Since(start) >= initialDelay {
+			delay = initialDelay
+		}
+
 		log.Printf("connection error: %v; reconnecting in %s", err, delay)
 
 		select {
@@ -80,7 +87,7 @@ func RunWithReconnect(ctx context.Context, cfg ReconnectConfig, dialAndRun func(
 		case <-time.After(delay):
 		}
 
-		// Exponential backoff.
+		// Exponential backoff for consecutive quick failures.
 		delay *= 2
 		if delay > maxDelay {
 			delay = maxDelay
