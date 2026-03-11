@@ -14,6 +14,20 @@ The script reads a raw email from stdin, base64url-encodes it, and calls:
         --json   '{"raw": "<base64url-encoded email>"}'
 
 Exit codes mirror the gws process so imapproc can decide on_success actions.
+
+Known limitation
+----------------
+The base64url-encoded email is passed as an inline value to the ``--json``
+argument of ``gws``.  The OS kernel imposes a limit on the total size of a
+process's argument list (``ARG_MAX``, typically 2 MB on Linux).  Emails whose
+encoded representation approaches or exceeds that limit will cause ``gws`` to
+fail with::
+
+    OSError: [Errno 7] Argument list too long: 'gws'
+
+For large emails use ``gws-import-to-gmail-direct.py`` instead, which bypasses
+``gws`` for the upload step and posts the email directly to the Gmail REST API
+using Python's standard ``urllib`` library.
 """
 
 import argparse
