@@ -81,10 +81,19 @@ type Config struct {
 	// ReconnectMaxDelay caps the exponential backoff delay. A zero value uses
 	// the library default (5m). Stored as a duration string in YAML (e.g. "5m").
 	ReconnectMaxDelay time.Duration `yaml:"reconnect_max_delay"`
+
+	// WebEnabled enables the built-in HTTP monitoring server (dashboard +
+	// /api/health). Disabled by default.
+	WebEnabled bool `yaml:"web_enabled"`
+
+	// WebAddr is the listen address for the HTTP monitoring server.
+	// Defaults to ":8080" when WebEnabled is true.
+	WebAddr string `yaml:"web_addr"`
 }
 
 // toRunConfig converts the CLI Config into an imapproc.Config for the run loop.
-func (c *Config) toRunConfig() imapproc.Config {
+// stats may be nil when monitoring is disabled.
+func (c *Config) toRunConfig(stats *imapproc.Stats) imapproc.Config {
 	return imapproc.Config{
 		User:                c.User,
 		Pass:                c.Pass,
@@ -95,6 +104,7 @@ func (c *Config) toRunConfig() imapproc.Config {
 		MoveTarget:          c.OnSuccessTarget,
 		Once:                c.Once,
 		IdleRefreshInterval: c.IdleRefreshInterval,
+		Stats:               stats,
 	}
 }
 
@@ -123,6 +133,8 @@ type yamlConfig struct {
 	Reconnect             bool                     `yaml:"reconnect"`
 	ReconnectInitialDelay time.Duration            `yaml:"reconnect_initial_delay"`
 	ReconnectMaxDelay     time.Duration            `yaml:"reconnect_max_delay"`
+	WebEnabled            bool                     `yaml:"web_enabled"`
+	WebAddr               string                   `yaml:"web_addr"`
 }
 
 // loadConfig reads and parses a YAML config file.
@@ -151,6 +163,8 @@ func loadConfig(path string) (*Config, error) {
 		Reconnect:             yc.Reconnect,
 		ReconnectInitialDelay: yc.ReconnectInitialDelay,
 		ReconnectMaxDelay:     yc.ReconnectMaxDelay,
+		WebEnabled:            yc.WebEnabled,
+		WebAddr:               yc.WebAddr,
 	}
 	return cfg, nil
 }
