@@ -5,12 +5,12 @@ BINS      := $(addprefix $(BIN_DIR)/,$(CMDS))
 REGISTRY   := ghcr.io/capi
 IMAGE_NAME := $(REGISTRY)/go-imapproc
 
-.PHONY: all build check test vet lint fmt clean tidy docker-slim docker-full docker-all docker-publish
+.PHONY: all build check test test-py vet lint fmt clean tidy docker-slim docker-full docker-all docker-publish
 
 all: build
 
 ## check: build, vet, and test — must pass before committing
-check: build vet test
+check: build vet test test-py
 
 build: $(BINS)
 
@@ -18,9 +18,13 @@ $(BIN_DIR)/%: cmd/%
 	@mkdir -p $(BIN_DIR)
 	go build -o $@ ./$<
 
-## test: run all tests
+## test: run all Go tests
 test:
 	go test ./...
+
+## test-py: run Python tests in scripts/
+test-py:
+	python3 -m pytest scripts/
 
 ## vet: run go vet
 vet:
