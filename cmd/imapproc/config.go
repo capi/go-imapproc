@@ -89,6 +89,10 @@ type Config struct {
 	// WebAddr is the listen address for the HTTP monitoring server.
 	// Defaults to ":8080" when WebEnabled is true.
 	WebAddr string `yaml:"web_addr"`
+
+	// InstanceName is an optional human-readable label for this instance.
+	// When non-empty it is included in the /api/health response.
+	InstanceName string `yaml:"instance_name"`
 }
 
 // toRunConfig converts the CLI Config into an imapproc.Config for the run loop.
@@ -135,6 +139,7 @@ type yamlConfig struct {
 	ReconnectMaxDelay     time.Duration            `yaml:"reconnect_max_delay"`
 	WebEnabled            bool                     `yaml:"web_enabled"`
 	WebAddr               string                   `yaml:"web_addr"`
+	InstanceName          string                   `yaml:"instance_name"`
 }
 
 // loadConfig reads and parses a YAML config file.
@@ -165,6 +170,7 @@ func loadConfig(path string) (*Config, error) {
 		ReconnectMaxDelay:     yc.ReconnectMaxDelay,
 		WebEnabled:            yc.WebEnabled,
 		WebAddr:               yc.WebAddr,
+		InstanceName:          yc.InstanceName,
 	}
 	return cfg, nil
 }

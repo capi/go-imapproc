@@ -11,9 +11,10 @@ import (
 
 // healthResponse mirrors the Spring Actuator /actuator/health envelope.
 type healthResponse struct {
-	Status  string        `json:"status"`
-	Details healthDetails `json:"details"`
-	Stats   healthStats   `json:"stats"`
+	Status       string        `json:"status"`
+	InstanceName string        `json:"instance_name,omitempty"`
+	Details      healthDetails `json:"details"`
+	Stats        healthStats   `json:"stats"`
 }
 
 type healthDetails struct {
@@ -64,7 +65,7 @@ const indexHTML = `<!DOCTYPE html>
   </style>
 </head>
 <body>
-  <h1>go-imapproc</h1>
+  <h1 id="title">go-imapproc</h1>
   <p>IMAP daemon that processes unread emails via an external program.</p>
   <p>Source: <a href="https://github.com/capi/go-imapproc">https://github.com/capi/go-imapproc</a></p>
   <div id="reach-banner">UNREACHABLE — last successful data shown below</div>
@@ -83,6 +84,10 @@ const indexHTML = `<!DOCTYPE html>
       var pollStatusCls = poll.timestamp
         ? (poll.healthy ? 'status-UP' : 'status-DOWN')
         : '';
+
+      var pageTitle = h.instance_name ? 'go-imapproc - ' + h.instance_name : 'go-imapproc';
+      document.getElementById('title').textContent = pageTitle;
+      document.title = pageTitle;
 
       var html = '<h3>Status</h3>';
       html += '<table><tr><th>Component</th><th>Status</th><th>Details</th></tr>';
@@ -134,9 +139,10 @@ const indexHTML = `<!DOCTYPE html>
 //	GET /         — HTML dashboard (auto-refreshes every 5 s via JS)
 //	GET /api/health — JSON health endpoint
 //
+// name is an optional instance label included in /api/health when non-empty.
 // The server shuts down gracefully when ctx is cancelled. It returns an error
 // only if the listener cannot be bound; context cancellation is not an error.
-func ServeWeb(ctx context.Context, addr string, stats *Stats) error {
+func ServeWeb(ctx context.Context, addr string, stats *Stats, name string) error {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
@@ -164,7 +170,8 @@ func ServeWeb(ctx context.Context, addr string, stats *Stats) error {
 		}
 
 		resp := healthResponse{
-			Status: overall,
+			Status:       overall,
+			InstanceName: name,
 			Details: healthDetails{
 				Connection: connectionDetail{
 					Status:  string(connStatus),

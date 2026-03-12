@@ -22,9 +22,10 @@ import (
 // healthResponse mirrors the JSON shape of GET /api/health so we can unmarshal
 // and assert individual fields without duplicating the production types.
 type healthResponse struct {
-	Status  string        `json:"status"`
-	Details healthDetails `json:"details"`
-	Stats   healthStats   `json:"stats"`
+	Status       string        `json:"status"`
+	InstanceName string        `json:"instance_name"`
+	Details      healthDetails `json:"details"`
+	Stats        healthStats   `json:"stats"`
 }
 
 type healthDetails struct {
@@ -56,6 +57,12 @@ type healthStats struct {
 // The server is also stopped via t.Cleanup.
 func startTestWebServer(t *testing.T, stats *imapproc.Stats) (baseURL string, cancel context.CancelFunc) {
 	t.Helper()
+	return startTestWebServerNamed(t, stats, "")
+}
+
+// startTestWebServerNamed is like startTestWebServer but also sets the instance name.
+func startTestWebServerNamed(t *testing.T, stats *imapproc.Stats, name string) (baseURL string, cancel context.CancelFunc) {
+	t.Helper()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -68,7 +75,7 @@ func startTestWebServer(t *testing.T, stats *imapproc.Stats) (baseURL string, ca
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- imapproc.ServeWeb(ctx, addr, stats)
+		errCh <- imapproc.ServeWeb(ctx, addr, stats, name)
 	}()
 
 	// Wait until the server is accepting connections.
@@ -319,7 +326,7 @@ func TestServeWeb_ContextCancelStopsServer(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- imapproc.ServeWeb(ctx, addr, s)
+		errCh <- imapproc.ServeWeb(ctx, addr, s, "")
 	}()
 
 	// Wait for the server to start.
@@ -458,4 +465,59 @@ func TestServeWeb_httptest_HealthEndpoint(t *testing.T) {
 	if hr.Stats.Failed != 0 {
 		t.Errorf("stats.messagesFailed = %d, want 0", hr.Stats.Failed)
 	}
+}
+
+// TestServeWeb_NameInHealthResponse verifies that when a name is set it appears
+// in the /api/health JSON, and that it is absent when the name is empty.
+func TestServeWeb_NameInHealthResponse(t *testing.T) {
+	t.Run("name set", func(t *testing.T) {
+		s := imapproc.NewStats()
+		s.SetConnected()
+
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("net.Listen: %v", err)
+		}
+		addr := ln.Addr().String()
+		ln.Close()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() { _ = imapproc.ServeWeb(ctx, addr, s, "myinstance") }()
+
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+			if err == nil {
+				conn.Close()
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+
+		hr, _ := getHealth(t, "http://"+addr)
+		if hr.InstanceName != "myinstance" {
+			t.Errorf("instance_name = %q, want %q", hr.InstanceName, "myinstance")
+		}
+	})
+
+	t.Run("name empty", func(t *testing.T) {
+		s := imapproc.NewStats()
+		s.SetConnected()
+		base := newHandlerTestServer(t, s)
+
+		resp, err := http.Get(base + "/api/health")
+		if err != nil {
+			t.Fatalf("GET /api/health: %v", err)
+		}
+		defer resp.Body.Close()
+
+		var raw map[string]json.RawMessage
+		if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if _, ok := raw["instance_name"]; ok {
+			t.Error("instance_name key present in JSON, want absent when empty")
+		}
+	})
 }

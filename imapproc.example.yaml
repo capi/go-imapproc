@@ -61,3 +61,8 @@ once: false
 # Default: :8080
 # web_addr: :8080
 
+# Optional name for this instance. When set it is included in the /api/health
+# response as the top-level "instance_name" field, displayed as "go-imapproc - <name>".
+# Default: "" (omitted from health response)
+# instance_name: myinstance
+

@@ -67,6 +67,7 @@ once: false
 --reconnect-max-delay duration    Maximum backoff delay between reconnects (default: 5m)
 --web-enabled                     Enable the HTTP monitoring server
 --web-addr string                 Listen address for the monitoring server (default: :8080)
+--instance-name string            Optional instance name shown in /api/health (default: "")
 ```
 
 CLI flags override config file values. Positional arguments override `--exec`:
@@ -131,6 +132,7 @@ imapproc --web-enabled --web-addr :8080
 ```json
 {
   "status": "UP",
+  "instance_name": "myinstance",
   "details": {
     "connection": { "status": "UP", "healthy": true },
     "lastPoll": { "healthy": true, "timestamp": "2025-06-15T12:00:00Z",

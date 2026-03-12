@@ -47,10 +47,10 @@ func main() {
 	if idleRefreshInterval == 0 {
 		idleRefreshInterval = imapproc.DefaultIdleRefreshInterval
 	}
-	log.Printf("config: addr=%s user=%s mailbox=%s exec=%s on_success=%s on_success_target=%s once=%v idle_refresh_interval=%s reconnect=%v reconnect_initial_delay=%s reconnect_max_delay=%s password=%s web_enabled=%v web_addr=%s",
+	log.Printf("config: addr=%s user=%s mailbox=%s exec=%s on_success=%s on_success_target=%s once=%v idle_refresh_interval=%s reconnect=%v reconnect_initial_delay=%s reconnect_max_delay=%s password=%s web_enabled=%v web_addr=%s instance_name=%s",
 		r.Addr, r.User, r.Mailbox, r.Exec, r.OnSuccess, r.OnSuccessTarget, r.Once, idleRefreshInterval,
 		r.Reconnect, reconnectInitialDelay, reconnectMaxDelay, r.Pass,
-		r.WebEnabled, r.WebAddr)
+		r.WebEnabled, r.WebAddr, r.InstanceName)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -84,6 +84,7 @@ func parseConfig(args []string, w io.Writer) (*Config, string, error) {
 	reconnectMaxDelay := fs.Duration("reconnect-max-delay", 0, fmt.Sprintf("Maximum backoff delay between reconnect attempts (default: %s)", imapproc.DefaultReconnectMaxDelay))
 	webEnabled := fs.Bool("web-enabled", false, "Enable the HTTP monitoring server (dashboard + /api/health)")
 	webAddr := fs.String("web-addr", "", fmt.Sprintf("Listen address for the HTTP monitoring server (default: %s)", DefaultWebAddr))
+	name := fs.String("instance-name", "", "Optional name for this instance; shown in /api/health")
 
 	fs.Usage = func() {
 		fmt.Fprintf(w, "Usage: imapproc [flags] [program [args...]]\n\n")
@@ -156,6 +157,9 @@ func parseConfig(args []string, w io.Writer) (*Config, string, error) {
 	if *webAddr != "" {
 		cfg.WebAddr = *webAddr
 	}
+	if *name != "" {
+		cfg.InstanceName = *name
+	}
 	// Positional args override --exec.
 	if fs.NArg() > 0 {
 		cfg.Exec = fs.Args()[0]
@@ -204,7 +208,7 @@ func dial(ctx context.Context, cfg *Config) error {
 		}
 		webErrCh := make(chan error, 1)
 		go func() {
-			webErrCh <- imapproc.ServeWeb(ctx, webAddr, stats)
+			webErrCh <- imapproc.ServeWeb(ctx, webAddr, stats, cfg.InstanceName)
 		}()
 		// Surface any immediate bind error before entering the IMAP loop.
 		select {
