@@ -34,6 +34,11 @@ type Config struct {
 	// DefaultIdleRefreshInterval.
 	IdleRefreshInterval time.Duration
 
+	// Stats holds health and metrics counters. When non-nil the run loop
+	// updates connection status and message counters. Set to nil to disable
+	// monitoring.
+	Stats *Stats
+
 	// OnIdleEntered is an optional callback invoked each time IDLE is entered.
 	// It is intended for tests that need to observe the IDLE refresh cycle.
 	OnIdleEntered func()
@@ -51,6 +56,10 @@ type Config struct {
 // message notification during IDLE; pass nil to disable IDLE wakeup (tests
 // that cancel the context before IDLE don't need it).
 func Run(ctx context.Context, c *imapclient.Client, cfg Config, newMail <-chan struct{}) error {
+	if cfg.Stats != nil {
+		cfg.Stats.SetDisconnected()
+	}
+
 	if err := c.Login(cfg.User, cfg.Pass).Wait(); err != nil {
 		return fmt.Errorf("login: %w", err)
 	}
@@ -58,6 +67,10 @@ func Run(ctx context.Context, c *imapclient.Client, cfg Config, newMail <-chan s
 
 	if _, err := c.Select(cfg.Mailbox, nil).Wait(); err != nil {
 		return fmt.Errorf("select %s: %w", cfg.Mailbox, err)
+	}
+
+	if cfg.Stats != nil {
+		cfg.Stats.SetConnected()
 	}
 
 	program := cfg.Exec
@@ -69,7 +82,10 @@ func Run(ctx context.Context, c *imapclient.Client, cfg Config, newMail <-chan s
 	}
 
 	for {
-		if err := ProcessUnread(c, program, programArgs, cfg.OnSuccess, cfg.MoveTarget); err != nil {
+		if err := ProcessUnread(c, program, programArgs, cfg.OnSuccess, cfg.MoveTarget, cfg.Stats); err != nil {
+			if cfg.Stats != nil {
+				cfg.Stats.SetDisconnected()
+			}
 			return err
 		}
 
@@ -78,6 +94,9 @@ func Run(ctx context.Context, c *imapclient.Client, cfg Config, newMail <-chan s
 		}
 
 		if err := Idle(ctx, c, newMail, refreshInterval, cfg.OnIdleEntered); err != nil {
+			if cfg.Stats != nil {
+				cfg.Stats.SetDisconnected()
+			}
 			return err
 		}
 

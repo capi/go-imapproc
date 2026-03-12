@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"time"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
@@ -32,8 +33,9 @@ const (
 const DefaultMoveTarget = "Trash"
 
 // ProcessUnread searches for all unread messages in the selected mailbox and
-// invokes the external program for each one.
-func ProcessUnread(c *imapclient.Client, program string, programArgs []string, onSuccess OnSuccessAction, moveTarget string) error {
+// invokes the external program for each one. stats may be nil (monitoring
+// disabled), in which case no counters are updated.
+func ProcessUnread(c *imapclient.Client, program string, programArgs []string, onSuccess OnSuccessAction, moveTarget string, stats *Stats) error {
 	criteria := &imap.SearchCriteria{
 		// NotFlag \Seen means "unread"
 		NotFlag: []imap.Flag{imap.FlagSeen},
@@ -46,23 +48,51 @@ func ProcessUnread(c *imapclient.Client, program string, programArgs []string, o
 	uids := data.AllUIDs()
 	if len(uids) == 0 {
 		log.Printf("no unread messages")
+		if stats != nil {
+			stats.SetLastPoll(PollSnapshot{Healthy: true, Time: timeNow()})
+		}
 		return nil
 	}
 	log.Printf("found %d unread message(s)", len(uids))
 
+	var pollReceived, pollSuccess, pollFailed int64
 	for _, uid := range uids {
-		if err := processMessage(c, uid, program, programArgs, onSuccess, moveTarget); err != nil {
-			// Log and continue; a single message failure should not abort the run.
+		ok, err := processMessage(c, uid, program, programArgs, onSuccess, moveTarget, stats)
+		if err != nil {
+			// IMAP-level error: log and continue; a single message failure
+			// should not abort the run.
 			log.Printf("error processing UID %d: %v", uid, err)
+			pollFailed++
+		} else if ok {
+			pollSuccess++
+		} else {
+			pollFailed++
 		}
+		pollReceived++
+	}
+	if stats != nil {
+		stats.SetLastPoll(PollSnapshot{
+			Received: pollReceived,
+			Success:  pollSuccess,
+			Failed:   pollFailed,
+			Healthy:  pollFailed == 0,
+			Time:     timeNow(),
+		})
 	}
 	return nil
 }
 
+// timeNow is a package-level var so tests can override it.
+var timeNow = func() time.Time { return time.Now() }
+
 // processMessage fetches the raw RFC822 content of a message, pipes it to the
 // external program, and on success performs the configured OnSuccess action
-// (mark as \Seen, delete, or move).
-func processMessage(c *imapclient.Client, uid imap.UID, program string, programArgs []string, onSuccess OnSuccessAction, moveTarget string) error {
+// (mark as \Seen, delete, or move). stats may be nil.
+//
+// Returns (true, nil) on program success, (false, nil) when the program exited
+// with a non-zero status (skip, no IMAP action taken), and (false, err) on
+// IMAP-level errors.
+func processMessage(c *imapclient.Client, uid imap.UID, program string, programArgs []string, onSuccess OnSuccessAction, moveTarget string, stats *Stats) (bool, error) {
 	uidSet := imap.UIDSetNum(uid)
 	// Peek: true prevents the server from implicitly marking the message \Seen
 	// on fetch. We set \Seen explicitly only after the external program exits
@@ -78,7 +108,7 @@ func processMessage(c *imapclient.Client, uid imap.UID, program string, programA
 
 	msg := fetchCmd.Next()
 	if msg == nil {
-		return fmt.Errorf("UID %d: no message returned by FETCH", uid)
+		return false, fmt.Errorf("UID %d: no message returned by FETCH", uid)
 	}
 
 	// Find the body section item in the streamed response.
@@ -96,7 +126,7 @@ func processMessage(c *imapclient.Client, uid imap.UID, program string, programA
 		}
 	}
 	if !found {
-		return fmt.Errorf("UID %d: no body section in FETCH response", uid)
+		return false, fmt.Errorf("UID %d: no body section in FETCH response", uid)
 	}
 
 	// Invoke the external program with the raw email on stdin.
@@ -106,6 +136,9 @@ func processMessage(c *imapclient.Client, uid imap.UID, program string, programA
 	cmd.Stderr = os.Stderr
 
 	log.Printf("processing UID %d: running %s", uid, program)
+	if stats != nil {
+		stats.IncReceived()
+	}
 	runErr := cmd.Run()
 
 	// Drain the remaining fetch response regardless of program outcome.
@@ -115,10 +148,16 @@ func processMessage(c *imapclient.Client, uid imap.UID, program string, programA
 
 	if runErr != nil {
 		log.Printf("UID %d: program exited with error: %v, skipping", uid, runErr)
-		return nil
+		if stats != nil {
+			stats.IncFailed()
+		}
+		return false, nil
 	}
 
-	return applyOnSuccess(c, uid, uidSet, onSuccess, moveTarget)
+	if stats != nil {
+		stats.IncSuccess()
+	}
+	return true, applyOnSuccess(c, uid, uidSet, onSuccess, moveTarget)
 }
 
 // applyOnSuccess performs the configured post-processing action on a message

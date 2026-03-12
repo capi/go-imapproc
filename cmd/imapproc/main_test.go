@@ -465,3 +465,106 @@ idle_refresh_interval: 15m
 		t.Errorf("IdleRefreshInterval = %v, want 5m (flag should override config)", cfg.IdleRefreshInterval)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Web monitoring flag tests
+// ---------------------------------------------------------------------------
+
+func TestParseConfig_WebEnabledFlag(t *testing.T) {
+	cfg, _, err := parseConfig(fullArgs("--web-enabled"), io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.WebEnabled {
+		t.Error("WebEnabled = false, want true when --web-enabled is passed")
+	}
+}
+
+func TestParseConfig_WebEnabledDefault(t *testing.T) {
+	cfg, _, err := parseConfig(fullArgs(), io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.WebEnabled {
+		t.Error("WebEnabled = true, want false when --web-enabled is not passed")
+	}
+}
+
+func TestParseConfig_WebAddrFlag(t *testing.T) {
+	cfg, _, err := parseConfig(fullArgs("--web-addr", ":9090"), io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.WebAddr != ":9090" {
+		t.Errorf("WebAddr = %q, want :9090", cfg.WebAddr)
+	}
+}
+
+func TestParseConfig_WebEnabledFromConfigFile(t *testing.T) {
+	path := writeYAML(t, `
+addr: imap.example.com:993
+user: bob
+pass: hunter2
+exec: /bin/handler
+web_enabled: true
+`)
+	cfg, _, err := parseConfig([]string{"--config", path}, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.WebEnabled {
+		t.Error("WebEnabled = false, want true when web_enabled: true in config file")
+	}
+}
+
+func TestParseConfig_WebAddrFromConfigFile(t *testing.T) {
+	path := writeYAML(t, `
+addr: imap.example.com:993
+user: bob
+pass: hunter2
+exec: /bin/handler
+web_addr: ":9090"
+`)
+	cfg, _, err := parseConfig([]string{"--config", path}, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.WebAddr != ":9090" {
+		t.Errorf("WebAddr = %q, want :9090", cfg.WebAddr)
+	}
+}
+
+func TestParseConfig_WebEnabledFlagOverridesConfigFile(t *testing.T) {
+	// Config file sets web_enabled: false; the flag should override it to true.
+	path := writeYAML(t, `
+addr: imap.example.com:993
+user: bob
+pass: hunter2
+exec: /bin/handler
+web_enabled: false
+`)
+	cfg, _, err := parseConfig([]string{"--config", path, "--web-enabled"}, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.WebEnabled {
+		t.Error("WebEnabled = false, want true when --web-enabled flag overrides config file")
+	}
+}
+
+func TestParseConfig_WebAddrFlagOverridesConfigFile(t *testing.T) {
+	path := writeYAML(t, `
+addr: imap.example.com:993
+user: bob
+pass: hunter2
+exec: /bin/handler
+web_addr: ":8080"
+`)
+	cfg, _, err := parseConfig([]string{"--config", path, "--web-addr", ":9191"}, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.WebAddr != ":9191" {
+		t.Errorf("WebAddr = %q, want :9191 (flag should override config)", cfg.WebAddr)
+	}
+}

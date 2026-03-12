@@ -49,3 +49,15 @@ once: false
 # Default: 5m
 # reconnect_max_delay: 5m
 
+# Enable the built-in HTTP monitoring server.
+# Exposes a dashboard at / and a JSON health endpoint at /api/health.
+# Only meaningful when running as a daemon (once: false).
+# Default: false
+# web_enabled: false
+
+# Listen address for the HTTP monitoring server.
+# Accepts any address understood by Go's net.Listen, e.g. ":8080" or
+# "127.0.0.1:9090".
+# Default: :8080
+# web_addr: :8080
+

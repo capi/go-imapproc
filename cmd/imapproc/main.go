@@ -20,6 +20,10 @@ import (
 	"github.com/capi/go-imapproc/internal/imapproc"
 )
 
+// DefaultWebAddr is the listen address used when --web-enabled is set but
+// --web-addr is not specified.
+const DefaultWebAddr = ":8080"
+
 func main() {
 	cfg, configPath, err := parseConfig(os.Args[1:], os.Stderr)
 	if err != nil {
@@ -43,9 +47,10 @@ func main() {
 	if idleRefreshInterval == 0 {
 		idleRefreshInterval = imapproc.DefaultIdleRefreshInterval
 	}
-	log.Printf("config: addr=%s user=%s mailbox=%s exec=%s on_success=%s on_success_target=%s once=%v idle_refresh_interval=%s reconnect=%v reconnect_initial_delay=%s reconnect_max_delay=%s password=%s",
+	log.Printf("config: addr=%s user=%s mailbox=%s exec=%s on_success=%s on_success_target=%s once=%v idle_refresh_interval=%s reconnect=%v reconnect_initial_delay=%s reconnect_max_delay=%s password=%s web_enabled=%v web_addr=%s",
 		r.Addr, r.User, r.Mailbox, r.Exec, r.OnSuccess, r.OnSuccessTarget, r.Once, idleRefreshInterval,
-		r.Reconnect, reconnectInitialDelay, reconnectMaxDelay, r.Pass)
+		r.Reconnect, reconnectInitialDelay, reconnectMaxDelay, r.Pass,
+		r.WebEnabled, r.WebAddr)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -77,6 +82,8 @@ func parseConfig(args []string, w io.Writer) (*Config, string, error) {
 	reconnect := fs.Bool("reconnect", false, "Reconnect automatically when the connection is lost (default: false)")
 	reconnectInitialDelay := fs.Duration("reconnect-initial-delay", 0, fmt.Sprintf("Initial backoff delay before first reconnect attempt (default: %s)", imapproc.DefaultReconnectInitialDelay))
 	reconnectMaxDelay := fs.Duration("reconnect-max-delay", 0, fmt.Sprintf("Maximum backoff delay between reconnect attempts (default: %s)", imapproc.DefaultReconnectMaxDelay))
+	webEnabled := fs.Bool("web-enabled", false, "Enable the HTTP monitoring server (dashboard + /api/health)")
+	webAddr := fs.String("web-addr", "", fmt.Sprintf("Listen address for the HTTP monitoring server (default: %s)", DefaultWebAddr))
 
 	fs.Usage = func() {
 		fmt.Fprintf(w, "Usage: imapproc [flags] [program [args...]]\n\n")
@@ -142,6 +149,13 @@ func parseConfig(args []string, w io.Writer) (*Config, string, error) {
 	if fs.Changed("reconnect-max-delay") {
 		cfg.ReconnectMaxDelay = *reconnectMaxDelay
 	}
+	// Web monitoring flags: only override when explicitly set on the command line.
+	if fs.Changed("web-enabled") {
+		cfg.WebEnabled = *webEnabled
+	}
+	if *webAddr != "" {
+		cfg.WebAddr = *webAddr
+	}
 	// Positional args override --exec.
 	if fs.NArg() > 0 {
 		cfg.Exec = fs.Args()[0]
@@ -179,7 +193,30 @@ func dial(ctx context.Context, cfg *Config) error {
 		InitialDelay: cfg.ReconnectInitialDelay,
 		MaxDelay:     cfg.ReconnectMaxDelay,
 	}
-	runConfig := cfg.toRunConfig()
+
+	// Set up monitoring stats and optionally start the web server.
+	var stats *imapproc.Stats
+	if cfg.WebEnabled {
+		stats = imapproc.NewStats()
+		webAddr := cfg.WebAddr
+		if webAddr == "" {
+			webAddr = DefaultWebAddr
+		}
+		webErrCh := make(chan error, 1)
+		go func() {
+			webErrCh <- imapproc.ServeWeb(ctx, webAddr, stats)
+		}()
+		// Surface any immediate bind error before entering the IMAP loop.
+		select {
+		case err := <-webErrCh:
+			if err != nil {
+				return fmt.Errorf("web server: %w", err)
+			}
+		default:
+		}
+	}
+
+	runConfig := cfg.toRunConfig(stats)
 
 	attempt := func(ctx context.Context) error {
 		newMail := make(chan struct{}, 1)
