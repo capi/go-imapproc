@@ -135,6 +135,45 @@ class TestExchangeRefreshToken:
             with pytest.raises(RuntimeError, match="Token exchange failed"):
                 mod.exchange_refresh_token("cid", "csec", "rtoken")
 
+    def test_raises_invalid_refresh_token_error_on_invalid_grant(self):
+        http_err = urllib.error.HTTPError(
+            url="https://oauth2.googleapis.com/token",
+            code=400,
+            msg="Bad Request",
+            hdrs=MagicMock(),
+            fp=io.BytesIO(b'{"error":"invalid_grant","error_description":"Token has been expired or revoked."}'),
+        )
+        with patch("urllib.request.urlopen", side_effect=http_err):
+            with pytest.raises(mod.InvalidRefreshTokenError, match="Token exchange failed"):
+                mod.exchange_refresh_token("cid", "csec", "rtoken")
+
+    def test_invalid_grant_is_subclass_of_runtime_error(self):
+        """InvalidRefreshTokenError must be catchable as RuntimeError."""
+        http_err = urllib.error.HTTPError(
+            url="https://oauth2.googleapis.com/token",
+            code=400,
+            msg="Bad Request",
+            hdrs=MagicMock(),
+            fp=io.BytesIO(b'{"error":"invalid_grant"}'),
+        )
+        with patch("urllib.request.urlopen", side_effect=http_err):
+            with pytest.raises(RuntimeError):
+                mod.exchange_refresh_token("cid", "csec", "rtoken")
+
+    def test_non_invalid_grant_400_raises_plain_runtime_error(self):
+        """A 400 with a different error code must NOT raise InvalidRefreshTokenError."""
+        http_err = urllib.error.HTTPError(
+            url="https://oauth2.googleapis.com/token",
+            code=400,
+            msg="Bad Request",
+            hdrs=MagicMock(),
+            fp=io.BytesIO(b'{"error":"invalid_client"}'),
+        )
+        with patch("urllib.request.urlopen", side_effect=http_err):
+            with pytest.raises(RuntimeError) as exc_info:
+                mod.exchange_refresh_token("cid", "csec", "rtoken")
+        assert not isinstance(exc_info.value, mod.InvalidRefreshTokenError)
+
 
 # ---------------------------------------------------------------------------
 # Unit tests: load_gws_credentials
@@ -278,8 +317,11 @@ class TestGetAccessToken:
     def test_uses_cached_token_when_fresh(self, monkeypatch, tmp_path):
         monkeypatch.delenv("GOOGLE_WORKSPACE_CLI_TOKEN", raising=False)
         p = tmp_path / "cache.json"
-        mod._save_cache(str(p), {"access_token": "cached-tok", "obtained_at": time.time() - 60})
-        token = mod.get_access_token(str(p), 50)
+        rt_hash = mod._sha256(SAMPLE_CREDS["refresh_token"])
+        mod._save_cache(str(p), {"access_token": "cached-tok", "obtained_at": time.time() - 60,
+                                  "refresh_token_sha256": rt_hash})
+        with patch.object(mod, "load_gws_credentials", return_value=SAMPLE_CREDS):
+            token = mod.get_access_token(str(p), 50)
         assert token == "cached-tok"
 
     def test_refreshes_when_cache_is_stale(self, monkeypatch, tmp_path):
@@ -315,6 +357,147 @@ class TestGetAccessToken:
         with patch.object(mod, "load_gws_credentials", return_value={"client_id": "x"}):
             with pytest.raises(RuntimeError, match="missing required fields"):
                 mod.get_access_token(str(p), 50)
+
+    def test_fails_immediately_when_refresh_token_cached_as_invalid(self, monkeypatch, tmp_path):
+        """If the cache records this refresh token as invalid, raise without hitting the endpoint."""
+        monkeypatch.delenv("GOOGLE_WORKSPACE_CLI_TOKEN", raising=False)
+        p = tmp_path / "cache.json"
+        rt_hash = mod._sha256(SAMPLE_CREDS["refresh_token"])
+        mod._save_cache(str(p), {
+            "refresh_token_sha256": rt_hash,
+            "invalid_refresh_token": True,
+            "invalid_refresh_token_at": time.time() - 60,
+        })
+        with patch.object(mod, "load_gws_credentials", return_value=SAMPLE_CREDS):
+            with patch.object(mod, "exchange_refresh_token") as mock_exchange:
+                with pytest.raises(mod.InvalidRefreshTokenError, match="expired or revoked"):
+                    mod.get_access_token(str(p), 50)
+        mock_exchange.assert_not_called()
+
+    def test_clears_invalid_flag_when_refresh_token_rotates(self, monkeypatch, tmp_path):
+        """A new refresh token (different hash) must clear the invalid flag and proceed."""
+        monkeypatch.delenv("GOOGLE_WORKSPACE_CLI_TOKEN", raising=False)
+        p = tmp_path / "cache.json"
+        # Cache records the *old* refresh token as invalid.
+        old_rt_hash = mod._sha256("old-refresh-token")
+        mod._save_cache(str(p), {
+            "refresh_token_sha256": old_rt_hash,
+            "invalid_refresh_token": True,
+            "invalid_refresh_token_at": time.time() - 60,
+        })
+        # Credentials now contain a *new* refresh token.
+        new_creds = {**SAMPLE_CREDS, "refresh_token": "new-refresh-token"}
+        with patch.object(mod, "load_gws_credentials", return_value=new_creds):
+            with patch.object(mod, "exchange_refresh_token", return_value="fresh-tok"):
+                token = mod.get_access_token(str(p), 50)
+        assert token == "fresh-tok"
+
+    def test_invalid_flag_ignored_for_different_token_hash(self, monkeypatch, tmp_path):
+        """The invalid flag is only honoured when the hash matches the current token."""
+        monkeypatch.delenv("GOOGLE_WORKSPACE_CLI_TOKEN", raising=False)
+        p = tmp_path / "cache.json"
+        mod._save_cache(str(p), {
+            "refresh_token_sha256": mod._sha256("some-other-token"),
+            "invalid_refresh_token": True,
+            "invalid_refresh_token_at": time.time() - 60,
+        })
+        with patch.object(mod, "load_gws_credentials", return_value=SAMPLE_CREDS):
+            with patch.object(mod, "exchange_refresh_token", return_value="ok-tok"):
+                token = mod.get_access_token(str(p), 50)
+        assert token == "ok-tok"
+
+    def test_fresh_cached_token_without_hash_is_reused(self, monkeypatch, tmp_path):
+        """Old-format cache (no refresh_token_sha256) with a fresh token must be reused.
+
+        This covers the upgrade path: an existing installation whose cache was
+        written by a previous version of the script (before the hash field was
+        introduced) must keep working without forcing an unnecessary token
+        exchange.
+        """
+        monkeypatch.delenv("GOOGLE_WORKSPACE_CLI_TOKEN", raising=False)
+        p = tmp_path / "cache.json"
+        # Deliberately omit refresh_token_sha256 — simulates a pre-upgrade cache.
+        mod._save_cache(str(p), {"access_token": "legacy-tok", "obtained_at": time.time() - 60})
+        with patch.object(mod, "load_gws_credentials", return_value=SAMPLE_CREDS):
+            with patch.object(mod, "exchange_refresh_token") as mock_exchange:
+                token = mod.get_access_token(str(p), 50)
+        assert token == "legacy-tok"
+        mock_exchange.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: _sha256
+# ---------------------------------------------------------------------------
+
+class TestSha256:
+    def test_returns_hex_string(self):
+        result = mod._sha256("hello")
+        assert isinstance(result, str)
+        assert len(result) == 64  # SHA-256 hex digest is always 64 chars
+
+    def test_deterministic(self):
+        assert mod._sha256("token") == mod._sha256("token")
+
+    def test_different_inputs_differ(self):
+        assert mod._sha256("token-a") != mod._sha256("token-b")
+
+    def test_known_value(self):
+        import hashlib
+        expected = hashlib.sha256(b"test").hexdigest()
+        assert mod._sha256("test") == expected
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: _refresh_and_save (invalid_grant handling)
+# ---------------------------------------------------------------------------
+
+class TestRefreshAndSave:
+    def test_saves_token_and_hash_on_success(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("GOOGLE_WORKSPACE_CLI_TOKEN", raising=False)
+        p = tmp_path / "cache.json"
+        mod._ensure_cache_file(str(p))
+        with patch.object(mod, "exchange_refresh_token", return_value="access-tok"):
+            token = mod._refresh_and_save(str(p), SAMPLE_CREDS)
+        assert token == "access-tok"
+        cache = json.loads(p.read_text())
+        assert cache["access_token"] == "access-tok"
+        assert cache["refresh_token_sha256"] == mod._sha256(SAMPLE_CREDS["refresh_token"])
+        assert "invalid_refresh_token" not in cache
+
+    def test_caches_invalid_flag_on_invalid_grant(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("GOOGLE_WORKSPACE_CLI_TOKEN", raising=False)
+        p = tmp_path / "cache.json"
+        mod._ensure_cache_file(str(p))
+        with patch.object(mod, "exchange_refresh_token",
+                          side_effect=mod.InvalidRefreshTokenError("expired")):
+            with pytest.raises(mod.InvalidRefreshTokenError):
+                mod._refresh_and_save(str(p), SAMPLE_CREDS)
+        cache = json.loads(p.read_text())
+        assert cache.get("invalid_refresh_token") is True
+        assert cache["refresh_token_sha256"] == mod._sha256(SAMPLE_CREDS["refresh_token"])
+        assert "access_token" not in cache
+
+    def test_invalid_flag_records_timestamp(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("GOOGLE_WORKSPACE_CLI_TOKEN", raising=False)
+        p = tmp_path / "cache.json"
+        mod._ensure_cache_file(str(p))
+        before = time.time()
+        with patch.object(mod, "exchange_refresh_token",
+                          side_effect=mod.InvalidRefreshTokenError("expired")):
+            with pytest.raises(mod.InvalidRefreshTokenError):
+                mod._refresh_and_save(str(p), SAMPLE_CREDS)
+        after = time.time()
+        cache = json.loads(p.read_text())
+        assert before <= cache["invalid_refresh_token_at"] <= after
+
+    def test_env_token_bypasses_exchange(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_TOKEN", "env-tok")
+        p = tmp_path / "cache.json"
+        mod._ensure_cache_file(str(p))
+        with patch.object(mod, "exchange_refresh_token") as mock_ex:
+            token = mod._refresh_and_save(str(p), SAMPLE_CREDS)
+        assert token == "env-tok"
+        mock_ex.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -439,10 +622,13 @@ class TestImportMessageWithRetry:
     def test_success_on_first_attempt(self, tmp_path, monkeypatch):
         monkeypatch.delenv("GOOGLE_WORKSPACE_CLI_TOKEN", raising=False)
         p = tmp_path / "cache.json"
-        mod._save_cache(str(p), {"access_token": "tok", "obtained_at": time.time() - 60})
+        rt_hash = mod._sha256(SAMPLE_CREDS["refresh_token"])
+        mod._save_cache(str(p), {"access_token": "tok", "obtained_at": time.time() - 60,
+                                  "refresh_token_sha256": rt_hash})
 
-        with patch.object(mod, "import_message", return_value=({"id": "x"}, False)) as m:
-            result = mod.import_message_with_retry(str(p), 50, "me", {}, SAMPLE_EMAIL, {})
+        with patch.object(mod, "load_gws_credentials", return_value=SAMPLE_CREDS):
+            with patch.object(mod, "import_message", return_value=({"id": "x"}, False)) as m:
+                result = mod.import_message_with_retry(str(p), 50, "me", {}, SAMPLE_EMAIL, {})
 
         assert result == {"id": "x"}
         assert m.call_count == 1

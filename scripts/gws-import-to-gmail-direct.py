@@ -16,6 +16,15 @@ command-line argument.  Instead it:
    and the request is retried; if the retry also fails the script exits with an
    error.
 
+   If the OAuth2 token endpoint responds with ``invalid_grant`` (the refresh
+   token has been expired or revoked by Google), the cache records the
+   SHA-256 hash of that refresh token together with an ``invalid_refresh_token``
+   flag.  Subsequent invocations that present the same refresh token will fail
+   immediately with a clear error message instead of repeatedly hitting the
+   token endpoint.  Once the user re-authenticates (``gws auth logout &&
+   gws auth login``), the new refresh token produces a different hash and the
+   invalid state is automatically cleared.
+
    The cache file is stored at ``~/.config/gws/imapproc-token-cache.json``
    (configurable via ``--token-cache-file``) with mode 0600.  Concurrent
    invocations co-ordinate via ``fcntl.flock()`` on the cache file so that
@@ -43,6 +52,7 @@ credentials are stored in the encrypted gws credential store.
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import subprocess
@@ -185,6 +195,15 @@ def load_gws_credentials() -> dict:
         raise RuntimeError(f"gws auth export returned invalid JSON: {exc}") from exc
 
 
+class InvalidRefreshTokenError(RuntimeError):
+    """Raised when the refresh token has been expired or revoked by Google."""
+
+
+def _sha256(value: str) -> str:
+    """Return the hex-encoded SHA-256 digest of *value*."""
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
 def exchange_refresh_token(
     client_id: str,
     client_secret: str,
@@ -194,7 +213,9 @@ def exchange_refresh_token(
 ) -> str:
     """Exchange a refresh_token for a fresh access token.
 
-    Returns the access token string.  Raises ``RuntimeError`` on failure.
+    Returns the access token string.  Raises ``InvalidRefreshTokenError`` when
+    Google responds with ``invalid_grant`` (token expired or revoked), or
+    ``RuntimeError`` on any other failure.
     """
     payload = urllib.parse.urlencode({
         "client_id": client_id,
@@ -214,6 +235,16 @@ def exchange_refresh_token(
             body = json.loads(resp.read())
     except urllib.error.HTTPError as exc:
         error_body = exc.read().decode(errors="replace")
+        # Detect permanently-invalid tokens so callers can cache the state.
+        if exc.code == 400:
+            try:
+                error_json = json.loads(error_body)
+            except json.JSONDecodeError:
+                error_json = {}
+            if error_json.get("error") == "invalid_grant":
+                raise InvalidRefreshTokenError(
+                    f"Token exchange failed ({exc.code}): {error_body}"
+                ) from exc
         raise RuntimeError(
             f"Token exchange failed ({exc.code}): {error_body}"
         ) from exc
@@ -282,10 +313,20 @@ def _is_token_fresh(cache: dict, rotation_minutes: int) -> bool:
     return age_seconds < rotation_minutes * 60
 
 
-def _refresh_and_save(cache_path: str) -> str:
+def _refresh_and_save(cache_path: str, creds: dict) -> str:
     """Obtain a fresh access token, persist it, and return it.
 
+    *creds* must contain ``client_id``, ``client_secret``, and
+    ``refresh_token`` (as returned by ``load_gws_credentials``).
+
     Must be called while the caller holds the flock on the cache file.
+
+    Stores the SHA-256 hash of the refresh token alongside the new access
+    token so that ``get_access_token`` can detect when the refresh token
+    rotates.
+
+    On ``InvalidRefreshTokenError``, marks the cache as invalid (keyed by
+    the token hash) and re-raises so the caller can surface a clear message.
     """
     env_token = os.environ.get("GOOGLE_WORKSPACE_CLI_TOKEN", "").strip()
     if env_token:
@@ -293,21 +334,26 @@ def _refresh_and_save(cache_path: str) -> str:
         _trace("token: using GOOGLE_WORKSPACE_CLI_TOKEN from environment")
         return env_token
 
-    creds = load_gws_credentials()
-    missing = [k for k in ("client_id", "client_secret", "refresh_token") if not creds.get(k)]
-    if missing:
-        raise RuntimeError(
-            f"gws credentials are missing required fields: {missing}. "
-            "Run 'gws auth login' to re-authenticate."
+    rt = creds["refresh_token"]
+    rt_hash = _sha256(rt)
+    try:
+        token = exchange_refresh_token(
+            creds["client_id"],
+            creds["client_secret"],
+            rt,
         )
-    token = exchange_refresh_token(
-        creds["client_id"],
-        creds["client_secret"],
-        creds["refresh_token"],
-    )
+    except InvalidRefreshTokenError:
+        _trace("token: refresh_token is permanently invalid (expired/revoked); caching state")
+        _save_cache(cache_path, {
+            "refresh_token_sha256": rt_hash,
+            "invalid_refresh_token": True,
+            "invalid_refresh_token_at": time.time(),
+        })
+        raise
     _save_cache(cache_path, {
         "access_token": token,
         "obtained_at": time.time(),
+        "refresh_token_sha256": rt_hash,
     })
     _trace(f"token: saved to cache {cache_path}")
     return token
@@ -322,9 +368,16 @@ def get_access_token(cache_path: str, rotation_minutes: int) -> str:
     Otherwise:
     1. Ensures the cache file exists (creating an empty one if needed).
     2. Acquires an exclusive flock on it.
-    3. Reads the cache; if the token is fresh enough, returns it immediately.
-    4. Otherwise refreshes the token via ``exchange_refresh_token``, persists
-       the new token, and returns it.
+    3. Reads the cache.  If the cached ``refresh_token_sha256`` differs from
+       the current refresh token (i.e. the user has re-authenticated), any
+       previously-recorded invalid state is ignored.
+    4. If the cache records the current refresh token as permanently invalid
+       (``invalid_refresh_token: true`` with a matching hash), fails
+       immediately with a clear error message rather than hitting the token
+       endpoint again.
+    5. If the token is still fresh enough, returns the cached access token.
+    6. Otherwise refreshes via ``exchange_refresh_token``, persists the new
+       token (along with the hash), and returns it.
 
     The flock is released when this function returns so that concurrent
     invocations serialize their refresh attempts.
@@ -340,14 +393,42 @@ def get_access_token(cache_path: str, rotation_minutes: int) -> str:
         fcntl.flock(f, fcntl.LOCK_EX)
         try:
             cache = _load_cache(f)
+
+            # Determine the current refresh token's identity.
+            creds = load_gws_credentials()
+            missing = [k for k in ("client_id", "client_secret", "refresh_token") if not creds.get(k)]
+            if missing:
+                raise RuntimeError(
+                    f"gws credentials are missing required fields: {missing}. "
+                    "Run 'gws auth login' to re-authenticate."
+                )
+            current_rt_hash = _sha256(creds["refresh_token"])
+            cached_rt_hash = cache.get("refresh_token_sha256")
+
+            if cached_rt_hash and cached_rt_hash != current_rt_hash:
+                _trace("token: refresh_token has rotated (user re-authenticated), clearing cached state")
+                cache = {}
+
+            if cache.get("invalid_refresh_token") and cache.get("refresh_token_sha256") == current_rt_hash:
+                _trace(
+                    "token: cached refresh_token is permanently invalid; "
+                    "run 'gws auth logout && gws auth login' to re-authenticate"
+                )
+                raise InvalidRefreshTokenError(
+                    "The stored refresh token has been expired or revoked. "
+                    "Run 'gws auth logout && gws auth login' to re-authenticate."
+                )
+
             if _is_token_fresh(cache, rotation_minutes):
                 age_min = int((time.time() - cache["obtained_at"]) / 60)
                 _trace(f"token: reusing cached token (age {age_min}m, rotation {rotation_minutes}m)")
                 return cache["access_token"]
+
             _trace(f"token: cached token absent or stale, refreshing (rotation {rotation_minutes}m)")
             # Token is stale or absent — refresh under the lock so only one
-            # concurrent process does the exchange.
-            return _refresh_and_save(cache_path)
+            # concurrent process does the exchange.  Pass the already-loaded
+            # credentials so _refresh_and_save can use them directly.
+            return _refresh_and_save(cache_path, creds)
         finally:
             fcntl.flock(f, fcntl.LOCK_UN)
 
@@ -459,11 +540,18 @@ def import_message_with_retry(
 
     # Token was rejected — force a refresh under lock.
     _trace("token: forcing refresh after 401, retrying request")
+    creds = load_gws_credentials()
+    missing = [k for k in ("client_id", "client_secret", "refresh_token") if not creds.get(k)]
+    if missing:
+        raise RuntimeError(
+            f"gws credentials are missing required fields: {missing}. "
+            "Run 'gws auth login' to re-authenticate."
+        )
     _ensure_cache_file(cache_path)
     with open(cache_path, "r+") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
         try:
-            access_token = _refresh_and_save(cache_path)
+            access_token = _refresh_and_save(cache_path, creds)
         finally:
             fcntl.flock(f, fcntl.LOCK_UN)
 

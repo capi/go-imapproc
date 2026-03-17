@@ -224,6 +224,8 @@ All options are identical to `gws-import-to-gmail.py` (see table above).
 
 The script caches access tokens locally to avoid unnecessary token exchanges. Cached tokens are reused until they are older than `--token-rotation-interval` (default: 50 minutes) or rejected by the API (401).
 
+If the refresh token itself is expired or revoked (Google returns `invalid_grant`), the cache records the SHA-256 hash of that refresh token alongside an invalid flag. Subsequent invocations with the same refresh token fail immediately without contacting Google. After running `gws auth login` to obtain a new refresh token, the invalid state is cleared automatically because the hash no longer matches.
+
 **Options**:
 - `--token-rotation-interval MINUTES` — Default: 50
 - `--token-cache-file PATH` — Default: `~/.config/gws/imapproc-token-cache.json`
@@ -275,9 +277,15 @@ gws auth status  # Verify credentials are present
 
 **`RuntimeError: Token exchange failed (400)`**
 
-The refresh token may have been revoked. Re-authenticate:
+The refresh token may have been revoked or expired. The script will cache this
+state (keyed by the SHA-256 hash of the refresh token) so that it fails
+immediately on the next invocation rather than hitting the token endpoint again.
+Re-authenticate to obtain a new refresh token:
 
 ```bash
 gws auth logout
 gws auth login
 ```
+
+Once you have a new refresh token the cached invalid state is automatically
+ignored (the hashes will differ).
