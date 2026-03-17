@@ -163,35 +163,35 @@ semantics.
 3. **More efficient** — Avoids spawning a separate `gws` CLI process. Uses Python
    stdlib only to make direct API calls, resulting in faster execution.
 
-4. **Same credential access** — Reads from the same `gws` credential store, so
-   no additional authentication setup is required.
+4. **Pluggable credentials** — Works with any credentials provider, not just
+   `gws`. Pass `--credentials-provider` to use Vault, 1Password, or any other
+   tool that can emit the required JSON.
 
-5. **CI/CD friendly** — Supports `GOOGLE_WORKSPACE_CLI_TOKEN` environment variable
-   for pre-authenticated environments where running `gws auth export` is not
+5. **CI/CD friendly** — Supports `GOOGLE_OAUTH_ACCESS_TOKEN` environment variable
+   for pre-authenticated environments where running a credentials provider is not
    possible.
 
 ### How it works
 
-1. Reads credentials via `gws auth export --unmasked` (or `GOOGLE_WORKSPACE_CLI_TOKEN` env var)
+1. Calls the credentials provider (default: `gws auth export --unmasked`, configurable
+   via `--credentials-provider`) and parses its JSON output for `client_id`,
+   `client_secret`, and `refresh_token`. Set `GOOGLE_OAUTH_ACCESS_TOKEN` to skip
+   this step entirely.
 2. Exchanges the stored `refresh_token` for a fresh access token via `https://oauth2.googleapis.com/token`
 3. Constructs a `multipart/related` request body with:
    - Part 1: JSON metadata (labels, flags, etc.)
    - Part 2: Raw RFC 2822 email with `Content-Type: message/rfc822`
 4. POSTs directly to `https://gmail.googleapis.com/upload/gmail/v1/users/{userId}/messages/import`
 
-No intermediate `gws` process execution, so no argument list size limits.
-
-**Note on authentication**: For simplicity, this script still relies on `gws` for
-initial authentication setup and credential storage. The key difference is that
-instead of invoking `gws` as a subprocess for the API call (which hits ARG_MAX),
-this script reads the stored `refresh_token` from `gws`'s credential store and
-exchanges it directly for an access token via Google's OAuth2 endpoint.
+No intermediate subprocess for the API call, so no argument list size limits.
 
 ### Prerequisites
 
 - **Python 3** — no third-party packages required (uses stdlib only).
-- **`gws`** — must be installed and authenticated (same as `gws-import-to-gmail.py`).
-  This script reads credentials from `gws`'s encrypted credential store.
+- A **credentials provider** whose stdout is a JSON object containing
+  `client_id`, `client_secret`, and `refresh_token`. The default provider is
+  `gws auth export --unmasked` (requires `gws` installed and authenticated).
+  Any other tool can be substituted via `--credentials-provider`.
 
 ### Usage
 
@@ -210,25 +210,37 @@ exec:
   - --process-for-calendar
   - --add-label-id
   - Label_123abc
+
+# Custom credentials provider (e.g. HashiCorp Vault):
+exec:
+  - scripts/gws-import-to-gmail-direct.py
+  - --credentials-provider
+  - vault kv get -field=json secret/gmail-oauth
 ```
 
-All options are identical to `gws-import-to-gmail.py` (see table above).
+All options are identical to `gws-import-to-gmail.py` (see table above), plus
+the additional options listed below.
+
+### Additional options
+
+| Option | Default | Description |
+|---|---|---|
+| `--credentials-provider CMD` | `gws auth export --unmasked` | Shell command whose stdout must be a JSON object with `client_id`, `client_secret`, and `refresh_token`. Use this to replace `gws` with any other credential source. |
+| `--token-rotation-interval MINUTES` | `50` | Reuse a cached access token until it is this many minutes old. |
+| `--token-cache-file PATH` | `~/.config/gws/imapproc-token-cache.json` | Path to the token cache file. |
 
 ### Environment variables
 
 | Variable | Description |
 |---|---|
-| `GOOGLE_WORKSPACE_CLI_TOKEN` | Pre-obtained OAuth2 access token. If set, the script uses this token directly without calling `gws auth export`. Useful for CI/CD pipelines. |
+| `GOOGLE_OAUTH_ACCESS_TOKEN` | Pre-obtained OAuth2 access token. If set, the script uses this token directly, skipping both the credentials provider and the token cache. Useful for CI/CD pipelines. |
+| `GOOGLE_WORKSPACE_CLI_TOKEN` | Deprecated alias for `GOOGLE_OAUTH_ACCESS_TOKEN`. Still accepted for backwards compatibility but emits a warning. |
 
 ### Token caching
 
 The script caches access tokens locally to avoid unnecessary token exchanges. Cached tokens are reused until they are older than `--token-rotation-interval` (default: 50 minutes) or rejected by the API (401).
 
-If the refresh token itself is expired or revoked (Google returns `invalid_grant`), the cache records the SHA-256 hash of that refresh token alongside an invalid flag. Subsequent invocations with the same refresh token fail immediately without contacting Google. After running `gws auth login` to obtain a new refresh token, the invalid state is cleared automatically because the hash no longer matches.
-
-**Options**:
-- `--token-rotation-interval MINUTES` — Default: 50
-- `--token-cache-file PATH` — Default: `~/.config/gws/imapproc-token-cache.json`
+If the refresh token itself is expired or revoked (Google returns `invalid_grant`), the cache records the SHA-256 hash of that refresh token alongside an invalid flag. Subsequent invocations with the same refresh token fail immediately without contacting Google. Once you obtain a new refresh token (by re-running your credentials provider after re-authenticating), the invalid state is cleared automatically because the hash no longer matches.
 
 ⚠️ **Security**: The cache file contains an active OAuth2 access token and is stored with mode `0600`. Ensure `~/.config/gws/` has appropriate permissions and is not world-readable.
 
@@ -252,40 +264,37 @@ cat message.eml | scripts/gws-import-to-gmail-direct.py --dry-run
 cat message.eml | scripts/gws-import-to-gmail-direct.py --add-label-id INBOX
 
 # With pre-obtained token (CI environment):
-export GOOGLE_WORKSPACE_CLI_TOKEN="ya29.abc123..."
+export GOOGLE_OAUTH_ACCESS_TOKEN="ya29.abc123..."
 cat large-email.eml | scripts/gws-import-to-gmail-direct.py
+
+# Custom credentials provider (e.g. HashiCorp Vault):
+cat message.eml | scripts/gws-import-to-gmail-direct.py \
+    --credentials-provider "vault kv get -field=json secret/gmail-oauth"
 ```
 
 ### Troubleshooting
 
-**`RuntimeError: gws not found on PATH`**
+**`RuntimeError: ... not found on PATH`**
 
-Ensure `gws` is installed and available on `$PATH`. Run:
-
-```bash
-which gws
-```
-
-**`RuntimeError: gws credentials are missing required fields`**
-
-Ensure `gws auth login` has been run to store credentials:
+The credentials provider binary is not on `$PATH`. Verify the command works
+interactively first:
 
 ```bash
-gws auth login
-gws auth status  # Verify credentials are present
+gws auth export --unmasked   # or whatever your --credentials-provider is
 ```
+
+**`RuntimeError: credentials are missing required fields`**
+
+The credentials provider's JSON output is missing one or more of `client_id`,
+`client_secret`, `refresh_token`. Run the provider command manually to inspect
+its output.
 
 **`RuntimeError: Token exchange failed (400)`**
 
 The refresh token may have been revoked or expired. The script will cache this
 state (keyed by the SHA-256 hash of the refresh token) so that it fails
 immediately on the next invocation rather than hitting the token endpoint again.
-Re-authenticate to obtain a new refresh token:
-
-```bash
-gws auth logout
-gws auth login
-```
+Re-authenticate using your credentials provider to obtain a new refresh token.
 
 Once you have a new refresh token the cached invalid state is automatically
 ignored (the hashes will differ).

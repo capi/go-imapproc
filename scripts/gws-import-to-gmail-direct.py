@@ -5,9 +5,15 @@ This script is a drop-in replacement for ``gws-import-to-gmail.py`` that
 avoids the OS ``ARG_MAX`` limit by never placing the email content on a
 command-line argument.  Instead it:
 
-1. Reads credentials (client_id, client_secret, refresh_token) from ``gws``::
+1. Reads credentials (client_id, client_secret, refresh_token) from an
+   external credentials provider::
 
-       gws auth export --unmasked
+       <credentials-provider-command>
+
+   The provider is configured via ``--credentials-provider`` (default:
+   ``gws auth export --unmasked``).  Any program whose stdout is a JSON
+   object containing ``client_id``, ``client_secret``, and ``refresh_token``
+   can be used.
 
 2. Obtains an access token, caching it in a local file to avoid unnecessary
    token exchanges.  The cached token is re-used until it is older than
@@ -21,9 +27,9 @@ command-line argument.  Instead it:
    SHA-256 hash of that refresh token together with an ``invalid_refresh_token``
    flag.  Subsequent invocations that present the same refresh token will fail
    immediately with a clear error message instead of repeatedly hitting the
-   token endpoint.  Once the user re-authenticates (``gws auth logout &&
-   gws auth login``), the new refresh token produces a different hash and the
-   invalid state is automatically cleared.
+   token endpoint.  Once the user re-authenticates (re-runs the credentials
+   provider to obtain a new refresh token), the new refresh token produces a
+   different hash and the invalid state is automatically cleared.
 
    The cache file is stored at ``~/.config/gws/imapproc-token-cache.json``
    (configurable via ``--token-cache-file``) with mode 0600.  Concurrent
@@ -34,6 +40,16 @@ command-line argument.  Instead it:
    endpoint (``https://gmail.googleapis.com/upload/gmail/v1/...``) using
    Python's standard ``urllib`` library — no third-party dependencies.
 
+Environment variables
+---------------------
+``GOOGLE_OAUTH_ACCESS_TOKEN``
+    If set, the script uses this access token directly and skips both the
+    credentials provider and the token cache entirely.  Useful in CI or
+    testing environments.
+
+    ``GOOGLE_WORKSPACE_CLI_TOKEN`` is accepted as a deprecated alias for
+    backwards compatibility and emits a warning.
+
 Usage
 -----
 Identical to gws-import-to-gmail.py::
@@ -43,11 +59,12 @@ Identical to gws-import-to-gmail.py::
     exec: ["scripts/gws-import-to-gmail-direct.py", "--never-mark-spam"]
     exec: ["scripts/gws-import-to-gmail-direct.py", "--token-rotation-interval", "30"]
     exec: ["scripts/gws-import-to-gmail-direct.py", "--token-cache-file", "/run/secrets/gmail-token.json"]
+    exec: ["scripts/gws-import-to-gmail-direct.py", "--credentials-provider", "vault-tool get-oauth-creds"]
 
 Prerequisites
 -------------
-``gws`` must be installed and ``gws auth login`` must have been run so that
-credentials are stored in the encrypted gws credential store.
+The credentials provider command (default: ``gws``) must be installed and
+configured before use.
 """
 
 import argparse
@@ -55,6 +72,7 @@ import fcntl
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -69,6 +87,10 @@ _DEFAULT_TOKEN_CACHE = os.path.expanduser("~/.config/gws/imapproc-token-cache.js
 
 # Default number of minutes before proactively rotating the access token.
 _DEFAULT_ROTATION_MINUTES = 50
+
+# Default credentials provider command whose stdout must be a JSON object
+# containing client_id, client_secret, and refresh_token.
+_DEFAULT_CREDENTIALS_PROVIDER = "gws auth export --unmasked"
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +183,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
             f"(default: {_DEFAULT_TOKEN_CACHE})."
         ),
     )
+    parser.add_argument(
+        "--credentials-provider",
+        default=_DEFAULT_CREDENTIALS_PROVIDER,
+        metavar="COMMAND",
+        help=(
+            "Shell command whose stdout is a JSON object containing "
+            "client_id, client_secret, and refresh_token. "
+            f"(default: {_DEFAULT_CREDENTIALS_PROVIDER!r})."
+        ),
+    )
     return parser
 
 
@@ -168,31 +200,48 @@ def build_argument_parser() -> argparse.ArgumentParser:
 # Credential / token helpers
 # ---------------------------------------------------------------------------
 
-def load_gws_credentials() -> dict:
-    """Return the unmasked gws credentials dict by calling ``gws auth export``.
+def load_credentials(provider_cmd: str) -> dict:
+    """Return credentials dict by running *provider_cmd* and parsing its JSON stdout.
 
-    Raises ``RuntimeError`` if gws is not available or has no stored
-    credentials.
+    *provider_cmd* is a shell-style command string that is split with
+    ``shlex.split()`` before being passed to ``subprocess.run``.  Its stdout
+    must be a JSON object containing at least ``client_id``, ``client_secret``,
+    and ``refresh_token``.
+
+    Raises ``RuntimeError`` if the command is not found, exits non-zero, or
+    returns invalid JSON.
     """
+    argv = shlex.split(provider_cmd)
     try:
         result = subprocess.run(
-            ["gws", "auth", "export", "--unmasked"],
+            argv,
             capture_output=True,
             check=True,
         )
     except FileNotFoundError:
         raise RuntimeError(
-            "gws not found on PATH. Install gws and run 'gws auth login' first."
+            f"Credentials provider not found: {argv[0]!r}. "
+            f"Check that '{provider_cmd}' is installed and on PATH."
         )
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(
-            f"gws auth export failed (exit {exc.returncode}): "
-            f"{exc.stderr.decode().strip()}"
+            f"Credentials provider failed (exit {exc.returncode}): "
+            f"{provider_cmd!r}: {exc.stderr.decode().strip()}"
         )
     try:
         return json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"gws auth export returned invalid JSON: {exc}") from exc
+        raise RuntimeError(
+            f"Credentials provider returned invalid JSON: {provider_cmd!r}: {exc}"
+        ) from exc
+
+
+def load_gws_credentials() -> dict:
+    """Backwards-compatible wrapper: call load_credentials with the default provider.
+
+    Deprecated — use ``load_credentials(provider_cmd)`` directly.
+    """
+    return load_credentials(_DEFAULT_CREDENTIALS_PROVIDER)
 
 
 class InvalidRefreshTokenError(RuntimeError):
@@ -313,6 +362,25 @@ def _is_token_fresh(cache: dict, rotation_minutes: int) -> bool:
     return age_seconds < rotation_minutes * 60
 
 
+def _get_env_token() -> str:
+    """Return an injected access token from the environment, or empty string.
+
+    Checks ``GOOGLE_OAUTH_ACCESS_TOKEN`` first.  Falls back to the deprecated
+    ``GOOGLE_WORKSPACE_CLI_TOKEN`` with a warning trace.
+    """
+    token = os.environ.get("GOOGLE_OAUTH_ACCESS_TOKEN", "").strip()
+    if token:
+        return token
+    legacy = os.environ.get("GOOGLE_WORKSPACE_CLI_TOKEN", "").strip()
+    if legacy:
+        _trace(
+            "token: GOOGLE_WORKSPACE_CLI_TOKEN is deprecated; "
+            "use GOOGLE_OAUTH_ACCESS_TOKEN instead"
+        )
+        return legacy
+    return ""
+
+
 def _refresh_and_save(cache_path: str, creds: dict) -> str:
     """Obtain a fresh access token, persist it, and return it.
 
@@ -328,10 +396,10 @@ def _refresh_and_save(cache_path: str, creds: dict) -> str:
     On ``InvalidRefreshTokenError``, marks the cache as invalid (keyed by
     the token hash) and re-raises so the caller can surface a clear message.
     """
-    env_token = os.environ.get("GOOGLE_WORKSPACE_CLI_TOKEN", "").strip()
+    env_token = _get_env_token()
     if env_token:
         # Env-injected token: skip the cache entirely (useful for CI/testing).
-        _trace("token: using GOOGLE_WORKSPACE_CLI_TOKEN from environment")
+        _trace("token: using injected token from environment")
         return env_token
 
     rt = creds["refresh_token"]
@@ -359,11 +427,13 @@ def _refresh_and_save(cache_path: str, creds: dict) -> str:
     return token
 
 
-def get_access_token(cache_path: str, rotation_minutes: int) -> str:
+def get_access_token(cache_path: str, rotation_minutes: int,
+                     credentials_provider: str = _DEFAULT_CREDENTIALS_PROVIDER) -> str:
     """Return a valid access token, using the on-disk cache when possible.
 
-    Checks ``GOOGLE_WORKSPACE_CLI_TOKEN`` first so the caller can inject a
-    token directly (useful for testing and CI environments).
+    Checks ``GOOGLE_OAUTH_ACCESS_TOKEN`` (and the deprecated
+    ``GOOGLE_WORKSPACE_CLI_TOKEN``) first so the caller can inject a token
+    directly (useful for testing and CI environments).
 
     Otherwise:
     1. Ensures the cache file exists (creating an empty one if needed).
@@ -382,9 +452,9 @@ def get_access_token(cache_path: str, rotation_minutes: int) -> str:
     The flock is released when this function returns so that concurrent
     invocations serialize their refresh attempts.
     """
-    env_token = os.environ.get("GOOGLE_WORKSPACE_CLI_TOKEN", "").strip()
+    env_token = _get_env_token()
     if env_token:
-        _trace("token: using GOOGLE_WORKSPACE_CLI_TOKEN from environment (cache skipped)")
+        _trace("token: using injected token from environment (cache skipped)")
         return env_token
 
     _ensure_cache_file(cache_path)
@@ -395,12 +465,12 @@ def get_access_token(cache_path: str, rotation_minutes: int) -> str:
             cache = _load_cache(f)
 
             # Determine the current refresh token's identity.
-            creds = load_gws_credentials()
+            creds = load_credentials(credentials_provider)
             missing = [k for k in ("client_id", "client_secret", "refresh_token") if not creds.get(k)]
             if missing:
                 raise RuntimeError(
-                    f"gws credentials are missing required fields: {missing}. "
-                    "Run 'gws auth login' to re-authenticate."
+                    f"Credentials are missing required fields: {missing}. "
+                    "Re-authenticate using your credentials provider."
                 )
             current_rt_hash = _sha256(creds["refresh_token"])
             cached_rt_hash = cache.get("refresh_token_sha256")
@@ -412,11 +482,11 @@ def get_access_token(cache_path: str, rotation_minutes: int) -> str:
             if cache.get("invalid_refresh_token") and cache.get("refresh_token_sha256") == current_rt_hash:
                 _trace(
                     "token: cached refresh_token is permanently invalid; "
-                    "run 'gws auth logout && gws auth login' to re-authenticate"
+                    "re-authenticate using your credentials provider"
                 )
                 raise InvalidRefreshTokenError(
                     "The stored refresh token has been expired or revoked. "
-                    "Run 'gws auth logout && gws auth login' to re-authenticate."
+                    "Re-authenticate using your credentials provider."
                 )
 
             if _is_token_fresh(cache, rotation_minutes):
@@ -523,6 +593,8 @@ def import_message_with_retry(
     metadata: dict,
     raw_email: bytes,
     query_params: dict,
+    *,
+    credentials_provider: str = _DEFAULT_CREDENTIALS_PROVIDER,
 ) -> dict:
     """Import a message, refreshing the token once on 401.
 
@@ -531,7 +603,7 @@ def import_message_with_retry(
     3. On 401: force-refresh the token (under lock, with safe replace), retry.
     4. On second 401 or any other error: raise ``RuntimeError``.
     """
-    access_token = get_access_token(cache_path, rotation_minutes)
+    access_token = get_access_token(cache_path, rotation_minutes, credentials_provider)
     response, token_rejected = import_message(
         access_token, user_id, metadata, raw_email, query_params
     )
@@ -540,12 +612,12 @@ def import_message_with_retry(
 
     # Token was rejected — force a refresh under lock.
     _trace("token: forcing refresh after 401, retrying request")
-    creds = load_gws_credentials()
+    creds = load_credentials(credentials_provider)
     missing = [k for k in ("client_id", "client_secret", "refresh_token") if not creds.get(k)]
     if missing:
         raise RuntimeError(
-            f"gws credentials are missing required fields: {missing}. "
-            "Run 'gws auth login' to re-authenticate."
+            f"Credentials are missing required fields: {missing}. "
+            "Re-authenticate using your credentials provider."
         )
     _ensure_cache_file(cache_path)
     with open(cache_path, "r+") as f:
@@ -561,7 +633,7 @@ def import_message_with_retry(
     if token_rejected:
         raise RuntimeError(
             "Gmail API returned 401 even after token refresh; "
-            "check gws credentials."
+            "check your credentials provider."
         )
     return response
 
@@ -612,6 +684,7 @@ def main() -> int:
             metadata,
             raw_email,
             query_params,
+            credentials_provider=args.credentials_provider,
         )
         print(json.dumps(response, indent=2))
         return 0
