@@ -1,0 +1,14 @@
+{
+  "features": {
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+      "version": "1.10.0",
+      "resolved": "ghcr.io/devcontainers/features/docker-outside-of-docker@sha256:c2c2cf829505ead8e4892c88c31b6594ae94a2bbb209e16e1fac456c1a3a624e",
+      "integrity": "sha256:c2c2cf829505ead8e4892c88c31b6594ae94a2bbb209e16e1fac456c1a3a624e"
+    },
+    "ghcr.io/georgofenbeck/features/lazygit-linuxbinary:1": {
+      "version": "1.0.0",
+      "resolved": "ghcr.io/georgofenbeck/features/lazygit-linuxbinary@sha256:5f95752dbaf9a2798039e7cfd09887dca886654899de5c3c257d870c74230523",
+      "integrity": "sha256:5f95752dbaf9a2798039e7cfd09887dca886654899de5c3c257d870c74230523"
+    }
+  }
+}
