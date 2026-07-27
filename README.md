@@ -105,7 +105,7 @@ imapproc --once
 
 ## Requirements
 
-- Go 1.25+ (for building)
+- Go 1.25.12+ (for building)
 - IMAP server access
 - For Gmail: [app-specific password](https://support.google.com/accounts/answer/185833)
 
